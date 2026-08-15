@@ -1,7 +1,11 @@
 {
   "functions": {
     "api/dart-lookup.js": {
-      "maxDuration": 60
+      "maxDuration": 30
+    },
+    "api/dart-refresh-cache.js": {
+      "maxDuration": 60,
+      "memory": 1024
     },
     "api/extract.js": {
       "maxDuration": 60

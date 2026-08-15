@@ -26,6 +26,7 @@ function newEntry() {
     leadership_end_date: '',
     listed_bonus_eligible_job: false,
     listed_bonus_confirmed: false,
+    job_title: '', // 정형입력 시 직무매칭 AI제안용 (DB 저장 안 함, 화면 전용)
     // 아래는 화면 표시용 임시 상태 (DB 저장 안 함)
     revenue_lookup_status: 'idle', // idle | loading | success | failed | ambiguous
     revenue_lookup_message: '',
@@ -39,7 +40,9 @@ function newEntry() {
 export default function App() {
   const [applicantName, setApplicantName] = useState('')
   const [targetJob, setTargetJob] = useState('')
-  const [entries, setEntries] = useState([newEntry()])
+  const [firstEntry] = useState(() => newEntry())
+  const [entries, setEntries] = useState([firstEntry])
+  const [expandedIds, setExpandedIds] = useState(() => new Set([firstEntry.id]))
   const [config, setConfig] = useState(null)
   const [result, setResult] = useState(null)
   const [tab, setTab] = useState('manual') // manual | upload
@@ -49,6 +52,13 @@ export default function App() {
   const [saveMsg, setSaveMsg] = useState('')
   const [showCriteria, setShowCriteria] = useState(false)
   const [configWarning, setConfigWarning] = useState('')
+  const [showSettings, setShowSettings] = useState(false)
+  const [settings, setSettings] = useState(null)
+  const [settingsMsg, setSettingsMsg] = useState('')
+  const [settingsSavingKey, setSettingsSavingKey] = useState('')
+  const [settingsEdits, setSettingsEdits] = useState({})
+  const [selectedHistoryIds, setSelectedHistoryIds] = useState(new Set())
+  const [historyDeleting, setHistoryDeleting] = useState(false)
   const resultRef = useRef(null)
   const fileInputRef = useRef(null)
 
@@ -78,12 +88,132 @@ export default function App() {
     setEntries((prev) => prev.map((e) => (e.id === id ? { ...e, [field]: value } : e)))
   }
 
+  async function loadSettings() {
+    try {
+      const res = await fetch('/api/settings')
+      const data = await res.json()
+      if (data.error) {
+        setSettingsMsg('불러오기 실패: ' + data.error)
+        return
+      }
+      setSettings(data)
+    } catch (err) {
+      setSettingsMsg('불러오기 실패: ' + err.message)
+    }
+  }
+
+  async function saveSettingRow(table, match, value, rowKey) {
+    const num = Number(value)
+    if (isNaN(num)) {
+      setSettingsMsg('숫자만 입력 가능합니다.')
+      return
+    }
+    setSettingsSavingKey(rowKey)
+    setSettingsMsg('')
+    try {
+      const res = await fetch('/api/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ table, match, weight_percent: num }),
+      })
+      const data = await res.json()
+      if (data.error) throw new Error(data.error)
+      setSettingsMsg('저장되었습니다.')
+      loadSettings()
+      loadWeightConfig().then(setConfig) // 화면의 계산 로직도 즉시 최신값으로 갱신
+    } catch (err) {
+      setSettingsMsg('저장 실패: ' + err.message)
+    } finally {
+      setSettingsSavingKey('')
+    }
+  }
+
+  function toggleSettings() {
+    const next = !showSettings
+    setShowSettings(next)
+    if (next && !settings) loadSettings()
+  }
+
+
+  function toggleHistorySelect(id) {
+    setSelectedHistoryIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  async function deleteSelectedHistory() {
+    if (selectedHistoryIds.size === 0) return
+    if (!confirm(`선택한 ${selectedHistoryIds.size}건을 삭제하시겠습니까? 되돌릴 수 없습니다.`)) return
+    setHistoryDeleting(true)
+    try {
+      const res = await fetch('/api/applicants', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ calculationResultIds: [...selectedHistoryIds] }),
+      })
+      const data = await res.json()
+      if (data.error) throw new Error(data.error)
+      setSelectedHistoryIds(new Set())
+      loadHistory()
+    } catch (err) {
+      alert('삭제 실패: ' + err.message)
+    } finally {
+      setHistoryDeleting(false)
+    }
+  }
+
+  async function suggestJobMatch(entryId) {
+    const entry = entries.find((e) => e.id === entryId)
+    if (!targetJob.trim()) {
+      alert('먼저 상단 "지원 직무"를 입력해주세요.')
+      return
+    }
+    if (!entry.job_title?.trim()) {
+      alert('이 경력의 "담당 직무명"을 입력해주세요.')
+      return
+    }
+    updateEntry(entryId, 'job_match_suggesting', true)
+    try {
+      const res = await fetch('/api/match-job', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ targetJob, jobTitle: entry.job_title }),
+      })
+      const data = await res.json()
+      if (data.error) throw new Error(data.error)
+      updateEntry(entryId, 'job_match', data.job_match_suggestion)
+    } catch (err) {
+      alert('직무매칭 제안 실패: ' + err.message)
+    } finally {
+      updateEntry(entryId, 'job_match_suggesting', false)
+    }
+  }
+
+  function toggleExpand(id) {
+    setExpandedIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
   function addEntry() {
-    setEntries((prev) => [...prev, newEntry()])
+    const e = newEntry()
+    setEntries((prev) => [...prev, e])
+    setExpandedIds((prev) => new Set(prev).add(e.id))
   }
 
   function removeEntry(id) {
     setEntries((prev) => prev.filter((e) => e.id !== id))
+    setExpandedIds((prev) => {
+      const next = new Set(prev)
+      next.delete(id)
+      return next
+    })
   }
 
   async function handleFileUpload(e) {
@@ -113,7 +243,10 @@ export default function App() {
         job_match: MATCH_LEVELS.includes(c.job_match_suggestion) ? c.job_match_suggestion : '동일',
         listed_bonus_eligible_job: suggestListedBonusEligible(c.job_title || ''),
       }))
-      if (extracted.length > 0) setEntries(extracted)
+      if (extracted.length > 0) {
+        setEntries(extracted)
+        setExpandedIds(new Set()) // 추출된 항목은 요약만 보이도록 접어서 시작 (필요한 것만 펼쳐 확인)
+      }
       setTab('manual')
     } catch (err) {
       alert('업로드 처리 중 오류: ' + err.message)
@@ -227,21 +360,159 @@ export default function App() {
 
   async function exportPdf() {
     if (!resultRef.current) return
-    const canvas = await html2canvas(resultRef.current, { scale: 2, backgroundColor: '#ffffff' })
-    const imgData = canvas.toDataURL('image/png')
-    const pdf = new jsPDF({ orientation: 'portrait', unit: 'pt', format: 'a4' })
-    const pageWidth = pdf.internal.pageSize.getWidth()
-    const imgWidth = pageWidth - 40
-    const imgHeight = (canvas.height * imgWidth) / canvas.width
-    pdf.text(`경력산출 결과 - ${applicantName || '지원자'}`, 20, 24)
-    pdf.addImage(imgData, 'PNG', 20, 36, imgWidth, imgHeight)
-    pdf.save(`경력산출_${applicantName || '지원자'}.pdf`)
+    // jsPDF의 기본 폰트는 한글을 지원하지 않아 pdf.text()로 한글을 쓰면 깨짐.
+    // 제목까지 포함한 화면을 통째로 캡처(이미지화)하여 폰트 문제를 원천 차단.
+    const titleDiv = document.createElement('div')
+    titleDiv.style.cssText = 'font-size:18px; font-weight:700; font-family:"Malgun Gothic","맑은 고딕",sans-serif; padding:0 0 12px 0; background:#fff;'
+    titleDiv.textContent = `경력산출 결과 - ${applicantName || '지원자'}`
+    resultRef.current.prepend(titleDiv)
+
+    try {
+      const canvas = await html2canvas(resultRef.current, { scale: 2, backgroundColor: '#ffffff' })
+      const imgData = canvas.toDataURL('image/png')
+      const pdf = new jsPDF({ orientation: 'portrait', unit: 'pt', format: 'a4' })
+      const pageWidth = pdf.internal.pageSize.getWidth()
+      const imgWidth = pageWidth - 40
+      const imgHeight = (canvas.height * imgWidth) / canvas.width
+      pdf.addImage(imgData, 'PNG', 20, 20, imgWidth, imgHeight)
+      pdf.save(`경력산출_${applicantName || '지원자'}.pdf`)
+    } finally {
+      titleDiv.remove()
+    }
   }
 
   return (
     <div className="container">
       <h1>경력산출 자동화 시스템</h1>
-      <div className="subtitle">인사기획팀 내부 전용 · v2026-08-15-07</div>
+      <div className="subtitle">인사기획팀 내부 전용 · v2026-08-15-09 (설정관리/이력삭제/직무매칭/DART캐시)</div>
+      <button type="button" className="criteria-toggle" style={{ marginBottom: 14 }} onClick={toggleSettings}>
+        {showSettings ? '설정 관리 접기 ▲' : '⚙ 설정 관리 (판단기준 수치 수정)'}
+      </button>
+      {showSettings && (
+        <div className="card">
+          <h2>설정 관리 — 계산 기준 수치</h2>
+          <p style={{ fontSize: 12, color: '#888', marginTop: -6, marginBottom: 12 }}>
+            여기서 값을 바꾸면 이후 모든 계산에 즉시 반영됩니다. 신중히 수정해주세요.
+          </p>
+          {!settings && <p style={{ fontSize: 13, color: '#888' }}>불러오는 중...</p>}
+          {settingsMsg && (
+            <p style={{ fontSize: 13, color: settingsMsg.includes('실패') ? '#d0342c' : '#16794f', marginBottom: 10 }}>{settingsMsg}</p>
+          )}
+          {settings && (
+            <>
+              <h4 style={{ fontSize: 13, marginBottom: 6 }}>직무 × 업종 매칭율 (%)</h4>
+              <div className="settings-grid">
+                {settings.jobIndustry.map((row) => {
+                  const key = `ji-${row.job_match}-${row.industry_match}`
+                  return (
+                    <div className="settings-row" key={key}>
+                      <span>{row.job_match} / {row.industry_match}</span>
+                      <input
+                        type="number"
+                        defaultValue={row.weight_percent}
+                        onChange={(ev) => setSettingsEdits((p) => ({ ...p, [key]: ev.target.value }))}
+                      />
+                      <button
+                        className="secondary"
+                        disabled={settingsSavingKey === key}
+                        onClick={() => saveSettingRow('job_industry_matrix', { job_match: row.job_match, industry_match: row.industry_match }, settingsEdits[key] ?? row.weight_percent, key)}
+                      >
+                        {settingsSavingKey === key ? '저장중' : '저장'}
+                      </button>
+                    </div>
+                  )
+                })}
+              </div>
+
+              <h4 style={{ fontSize: 13, margin: '16px 0 6px' }}>직무 × 매출구간 매칭율 (%)</h4>
+              <div className="settings-grid">
+                {settings.jobRevenue.map((row) => {
+                  const key = `jr-${row.job_match}-${row.revenue_bracket}`
+                  return (
+                    <div className="settings-row" key={key}>
+                      <span>{row.job_match} / {row.revenue_bracket}</span>
+                      <input
+                        type="number"
+                        defaultValue={row.weight_percent}
+                        onChange={(ev) => setSettingsEdits((p) => ({ ...p, [key]: ev.target.value }))}
+                      />
+                      <button
+                        className="secondary"
+                        disabled={settingsSavingKey === key}
+                        onClick={() => saveSettingRow('job_revenue_matrix', { job_match: row.job_match, revenue_bracket: row.revenue_bracket }, settingsEdits[key] ?? row.weight_percent, key)}
+                      >
+                        {settingsSavingKey === key ? '저장중' : '저장'}
+                      </button>
+                    </div>
+                  )
+                })}
+              </div>
+
+              <h4 style={{ fontSize: 13, margin: '16px 0 6px' }}>고용형태 계수 (%)</h4>
+              <div className="settings-grid">
+                {settings.employmentType.map((row) => {
+                  const key = `et-${row.employment_type}`
+                  return (
+                    <div className="settings-row" key={key}>
+                      <span>{row.employment_type}</span>
+                      <input
+                        type="number"
+                        defaultValue={row.weight_percent}
+                        onChange={(ev) => setSettingsEdits((p) => ({ ...p, [key]: ev.target.value }))}
+                      />
+                      <button
+                        className="secondary"
+                        disabled={settingsSavingKey === key}
+                        onClick={() => saveSettingRow('employment_type_weights', { employment_type: row.employment_type }, settingsEdits[key] ?? row.weight_percent, key)}
+                      >
+                        {settingsSavingKey === key ? '저장중' : '저장'}
+                      </button>
+                    </div>
+                  )
+                })}
+              </div>
+
+              <h4 style={{ fontSize: 13, margin: '16px 0 6px' }}>리더십 프리미엄 / 상장가산 (%)</h4>
+              <div className="settings-grid">
+                {settings.leadershipPremium && (
+                  <div className="settings-row">
+                    <span>리더십 프리미엄</span>
+                    <input
+                      type="number"
+                      defaultValue={settings.leadershipPremium.weight_percent}
+                      onChange={(ev) => setSettingsEdits((p) => ({ ...p, lp: ev.target.value }))}
+                    />
+                    <button
+                      className="secondary"
+                      disabled={settingsSavingKey === 'lp'}
+                      onClick={() => saveSettingRow('leadership_premium_config', { id: settings.leadershipPremium.id }, settingsEdits.lp ?? settings.leadershipPremium.weight_percent, 'lp')}
+                    >
+                      {settingsSavingKey === 'lp' ? '저장중' : '저장'}
+                    </button>
+                  </div>
+                )}
+                {settings.listedBonus && (
+                  <div className="settings-row">
+                    <span>상장가산</span>
+                    <input
+                      type="number"
+                      defaultValue={settings.listedBonus.weight_percent}
+                      onChange={(ev) => setSettingsEdits((p) => ({ ...p, lb: ev.target.value }))}
+                    />
+                    <button
+                      className="secondary"
+                      disabled={settingsSavingKey === 'lb'}
+                      onClick={() => saveSettingRow('listed_bonus_config', { id: settings.listedBonus.id }, settingsEdits.lb ?? settings.listedBonus.weight_percent, 'lb')}
+                    >
+                      {settingsSavingKey === 'lb' ? '저장중' : '저장'}
+                    </button>
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+      )}
       {configWarning && (
         <div style={{ background: '#fdecea', border: '1px solid #f5b5ac', color: '#9a2f22', padding: '10px 14px', borderRadius: 6, fontSize: 13, marginBottom: 16 }}>
           ⚠ {configWarning}
@@ -334,99 +605,156 @@ export default function App() {
             </ul>
           </div>
         )}
-        <div style={{ overflowX: 'auto' }}>
-        <table>
-          <thead>
-            <tr>
-              <th>회사명</th><th>입사일</th><th>퇴사일</th><th>고용형태</th>
-              <th>직무매칭</th><th>업종매칭</th><th>매출구간</th><th>돌봄도메인</th>
-              <th>팀장 시작</th><th>팀장 종료</th><th>상장<br/>가산대상</th><th>실제<br/>업무확인</th><th></th>
-            </tr>
-          </thead>
-          <tbody>
-            {entries.map((e) => (
-              <tr key={e.id}>
-                <td><input style={{ width: 100 }} value={e.company_name} onChange={(ev) => updateEntry(e.id, 'company_name', ev.target.value)} /></td>
-                <td><input type="date" value={e.start_date} onChange={(ev) => updateEntry(e.id, 'start_date', ev.target.value)} /></td>
-                <td><input type="date" value={e.end_date} onChange={(ev) => updateEntry(e.id, 'end_date', ev.target.value)} /></td>
-                <td>
-                  <select value={e.employment_type} onChange={(ev) => updateEntry(e.id, 'employment_type', ev.target.value)}>
-                    {EMPLOYMENT_TYPES.map((v) => <option key={v}>{v}</option>)}
-                  </select>
-                </td>
-                <td>
-                  <select value={e.job_match} onChange={(ev) => updateEntry(e.id, 'job_match', ev.target.value)}>
-                    {MATCH_LEVELS.map((v) => <option key={v}>{v}</option>)}
-                  </select>
-                </td>
-                <td>
-                  <select value={e.industry_match} onChange={(ev) => updateEntry(e.id, 'industry_match', ev.target.value)}>
-                    <option value="동종">동종</option><option value="유사">유사</option><option value="기타">기타</option>
-                  </select>
-                  {(e.market_hint || e.established_hint) && (
-                    <div style={{ fontSize: 10, color: '#888', marginTop: 2 }}>
-                      참고: {e.market_hint || '비상장'}
-                      {e.established_hint && ` · 설립 ${e.established_hint.slice(0,4)}-${e.established_hint.slice(4,6)}-${e.established_hint.slice(6,8)}`}
-                    </div>
-                  )}
-                </td>
-                <td>
-                  <select value={e.revenue_bracket} onChange={(ev) => { updateEntry(e.id, 'revenue_bracket', ev.target.value); updateEntry(e.id, 'revenue_source', 'manual') }}>
-                    {REVENUE_BRACKETS.map((v) => <option key={v}>{v}</option>)}
-                  </select>
-                  <div style={{ marginTop: 4 }}>
-                    <button
-                      type="button"
-                      className="secondary"
-                      style={{ padding: '2px 6px', fontSize: 11 }}
-                      onClick={() => lookupRevenue(e.id)}
-                      disabled={e.revenue_lookup_status === 'loading'}
-                    >
-                      {e.revenue_lookup_status === 'loading' ? '조회중...' : 'DART 조회'}
-                    </button>
-                    {e.is_listed_hint !== null && (
-                      <span className="flag" style={{ background: e.is_listed_hint ? '#dcf5e4' : '#eee', color: e.is_listed_hint ? '#16794f' : '#666' }}>
-                        {e.is_listed_hint ? '상장사' : '비상장'}
-                      </span>
-                    )}
-                    {e.revenue_source === 'auto' && (
-                      <div style={{ fontSize: 10, color: '#888', marginTop: 2 }}>{e.revenue_raw_value}</div>
-                    )}
-                    {e.revenue_lookup_status === 'failed' && (
-                      <div style={{ fontSize: 10, color: '#d0342c', marginTop: 2 }}>{e.revenue_lookup_message}</div>
-                    )}
-                    {e.revenue_lookup_status === 'ambiguous' && (
-                      <div style={{ marginTop: 4 }}>
-                        <div style={{ fontSize: 10, color: '#92660a' }}>{e.revenue_lookup_message}</div>
-                        {e.revenue_lookup_candidates.map((c) => (
-                          <button
-                            key={c.corp_code}
-                            type="button"
-                            className="secondary"
-                            style={{ display: 'block', padding: '2px 6px', fontSize: 11, marginTop: 2, width: '100%' }}
-                            onClick={() => lookupRevenue(e.id, c.corp_code)}
-                          >
-                            {c.corp_name} {c.stock_code ? `(${c.stock_code})` : '(비상장)'}
-                          </button>
-                        ))}
-                      </div>
-                    )}
+        <div className="entry-list">
+          {entries.map((e, idx) => {
+            const isExpanded = expandedIds.has(e.id)
+            return (
+              <div className="entry-card" key={e.id}>
+                <div className="entry-card-header" onClick={() => toggleExpand(e.id)}>
+                  <div className="entry-card-header-main">
+                    <span className="entry-card-title">{e.company_name || `경력 ${idx + 1} (회사명 미입력)`}</span>
+                    <span className="entry-card-meta">
+                      {e.start_date && e.end_date ? `${e.start_date} ~ ${e.end_date}` : '기간 미입력'}
+                      {e.gap_flag && <span className="flag">경력단절 90일+</span>}
+                    </span>
                   </div>
-                </td>
-                <td>
-                  <select value={e.care_domain_match} onChange={(ev) => updateEntry(e.id, 'care_domain_match', ev.target.value)}>
-                    {MATCH_LEVELS.map((v) => <option key={v}>{v}</option>)}
-                  </select>
-                </td>
-                <td><input type="date" value={e.leadership_start_date} onChange={(ev) => updateEntry(e.id, 'leadership_start_date', ev.target.value)} /></td>
-                <td><input type="date" value={e.leadership_end_date} onChange={(ev) => updateEntry(e.id, 'leadership_end_date', ev.target.value)} /></td>
-                <td style={{ textAlign: 'center' }}><input type="checkbox" checked={e.listed_bonus_eligible_job} onChange={(ev) => updateEntry(e.id, 'listed_bonus_eligible_job', ev.target.checked)} /></td>
-                <td style={{ textAlign: 'center' }}><input type="checkbox" checked={e.listed_bonus_confirmed} onChange={(ev) => updateEntry(e.id, 'listed_bonus_confirmed', ev.target.checked)} disabled={!e.listed_bonus_eligible_job} /></td>
-                <td><button className="danger" onClick={() => removeEntry(e.id)}>삭제</button></td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+                  <span className="entry-card-toggle">{isExpanded ? '접기 ▲' : '펼치기 ▼'}</span>
+                </div>
+
+                {isExpanded && (
+                  <div className="entry-card-body">
+                    <div className="entry-field">
+                      <label>회사명</label>
+                      <input value={e.company_name} onChange={(ev) => updateEntry(e.id, 'company_name', ev.target.value)} />
+                    </div>
+                    <div className="entry-field">
+                      <label>입사일</label>
+                      <input type="date" value={e.start_date} onChange={(ev) => updateEntry(e.id, 'start_date', ev.target.value)} />
+                    </div>
+                    <div className="entry-field">
+                      <label>퇴사일</label>
+                      <input type="date" value={e.end_date} onChange={(ev) => updateEntry(e.id, 'end_date', ev.target.value)} />
+                    </div>
+                    <div className="entry-field">
+                      <label>고용형태</label>
+                      <select value={e.employment_type} onChange={(ev) => updateEntry(e.id, 'employment_type', ev.target.value)}>
+                        {EMPLOYMENT_TYPES.map((v) => <option key={v}>{v}</option>)}
+                      </select>
+                    </div>
+                    <div className="entry-field">
+                      <label>담당 직무명</label>
+                      <input
+                        placeholder="예: 인사기획 팀장"
+                        value={e.job_title}
+                        onChange={(ev) => updateEntry(e.id, 'job_title', ev.target.value)}
+                      />
+                    </div>
+                    <div className="entry-field">
+                      <label>직무매칭</label>
+                      <div className="entry-revenue-row">
+                        <select value={e.job_match} onChange={(ev) => updateEntry(e.id, 'job_match', ev.target.value)}>
+                          {MATCH_LEVELS.map((v) => <option key={v}>{v}</option>)}
+                        </select>
+                        <button
+                          type="button"
+                          className="secondary"
+                          onClick={() => suggestJobMatch(e.id)}
+                          disabled={e.job_match_suggesting}
+                        >
+                          {e.job_match_suggesting ? '제안중...' : 'AI 제안'}
+                        </button>
+                      </div>
+                    </div>
+                    <div className="entry-field">
+                      <label>업종매칭</label>
+                      <select value={e.industry_match} onChange={(ev) => updateEntry(e.id, 'industry_match', ev.target.value)}>
+                        <option value="동종">동종</option><option value="유사">유사</option><option value="기타">기타</option>
+                      </select>
+                      {(e.market_hint || e.established_hint) && (
+                        <div className="entry-field-hint">
+                          참고: {e.market_hint || '비상장'}
+                          {e.established_hint && ` · 설립 ${e.established_hint.slice(0, 4)}-${e.established_hint.slice(4, 6)}-${e.established_hint.slice(6, 8)}`}
+                        </div>
+                      )}
+                    </div>
+                    <div className="entry-field">
+                      <label>돌봄도메인</label>
+                      <select value={e.care_domain_match} onChange={(ev) => updateEntry(e.id, 'care_domain_match', ev.target.value)}>
+                        {MATCH_LEVELS.map((v) => <option key={v}>{v}</option>)}
+                      </select>
+                    </div>
+                    <div className="entry-field">
+                      <label>팀장 시작</label>
+                      <input type="date" value={e.leadership_start_date} onChange={(ev) => updateEntry(e.id, 'leadership_start_date', ev.target.value)} />
+                    </div>
+                    <div className="entry-field">
+                      <label>팀장 종료</label>
+                      <input type="date" value={e.leadership_end_date} onChange={(ev) => updateEntry(e.id, 'leadership_end_date', ev.target.value)} />
+                    </div>
+
+                    <div className="entry-field entry-field-full">
+                      <label>매출구간</label>
+                      <div className="entry-revenue-row">
+                        <select value={e.revenue_bracket} onChange={(ev) => { updateEntry(e.id, 'revenue_bracket', ev.target.value); updateEntry(e.id, 'revenue_source', 'manual') }}>
+                          {REVENUE_BRACKETS.map((v) => <option key={v}>{v}</option>)}
+                        </select>
+                        <button
+                          type="button"
+                          className="secondary"
+                          onClick={() => lookupRevenue(e.id)}
+                          disabled={e.revenue_lookup_status === 'loading'}
+                        >
+                          {e.revenue_lookup_status === 'loading' ? '조회중...' : 'DART 조회'}
+                        </button>
+                        {e.is_listed_hint !== null && (
+                          <span className="flag" style={{ background: e.is_listed_hint ? '#dcf5e4' : '#eee', color: e.is_listed_hint ? '#16794f' : '#666' }}>
+                            {e.is_listed_hint ? '상장사' : '비상장'}
+                          </span>
+                        )}
+                      </div>
+                      {e.revenue_source === 'auto' && <div className="entry-field-hint">{e.revenue_raw_value}</div>}
+                      {e.revenue_lookup_status === 'failed' && <div className="entry-field-hint entry-field-hint-error">{e.revenue_lookup_message}</div>}
+                      {e.revenue_lookup_status === 'ambiguous' && (
+                        <div style={{ marginTop: 4 }}>
+                          <div className="entry-field-hint entry-field-hint-warn">{e.revenue_lookup_message}</div>
+                          {e.revenue_lookup_candidates.map((c) => (
+                            <button
+                              key={c.corp_code}
+                              type="button"
+                              className="secondary"
+                              style={{ display: 'block', padding: '4px 8px', fontSize: 12, marginTop: 4, width: '100%' }}
+                              onClick={() => lookupRevenue(e.id, c.corp_code)}
+                            >
+                              {c.corp_name} {c.stock_code ? `(${c.stock_code})` : '(비상장)'}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="entry-field">
+                      <label>상장가산대상</label>
+                      <label className="entry-checkbox-row">
+                        <input type="checkbox" checked={e.listed_bonus_eligible_job} onChange={(ev) => updateEntry(e.id, 'listed_bonus_eligible_job', ev.target.checked)} />
+                        <span>시스템 제안 대상</span>
+                      </label>
+                    </div>
+                    <div className="entry-field">
+                      <label>실제업무확인</label>
+                      <label className="entry-checkbox-row">
+                        <input type="checkbox" checked={e.listed_bonus_confirmed} onChange={(ev) => updateEntry(e.id, 'listed_bonus_confirmed', ev.target.checked)} disabled={!e.listed_bonus_eligible_job} />
+                        <span>담당자 최종 확인</span>
+                      </label>
+                    </div>
+
+                    <div className="entry-field-full entry-card-footer">
+                      <button type="button" className="danger" onClick={() => removeEntry(e.id)}>이 경력 삭제</button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )
+          })}
         </div>
         <div className="btn-row">
           <button className="secondary" onClick={addEntry}>+ 경력 추가</button>
@@ -476,13 +804,52 @@ export default function App() {
       <div className="card">
         <h2>4. 최근 산출 이력</h2>
         {history.length === 0 && <p style={{ color: '#888', fontSize: 13 }}>저장된 이력이 없습니다.</p>}
-        {history.map((h) => (
-          <div className="history-item" key={h.id}>
-            <span>{h.applicants?.name || '(이름없음)'}</span>
-            <span>{h.rounded_years}년차 ({Number(h.total_recognized_years).toFixed(2)}년)</span>
-            <span>{new Date(h.calculated_at).toLocaleDateString('ko-KR')}</span>
-          </div>
-        ))}
+        {history.length > 0 && (
+          <>
+            <div className="btn-row" style={{ marginTop: 0, marginBottom: 10 }}>
+              <button
+                className="danger"
+                disabled={selectedHistoryIds.size === 0 || historyDeleting}
+                onClick={deleteSelectedHistory}
+              >
+                {historyDeleting ? '삭제 중...' : `선택 삭제 (${selectedHistoryIds.size})`}
+              </button>
+            </div>
+            <div style={{ overflowX: 'auto' }}>
+              <table>
+                <thead>
+                  <tr>
+                    <th style={{ width: 30 }}>
+                      <input
+                        type="checkbox"
+                        checked={selectedHistoryIds.size === history.length}
+                        onChange={(ev) => setSelectedHistoryIds(ev.target.checked ? new Set(history.map((h) => h.id)) : new Set())}
+                      />
+                    </th>
+                    <th>이름</th><th>직무군</th><th>인정경력</th><th>날짜</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {history.map((h) => (
+                    <tr key={h.id}>
+                      <td>
+                        <input
+                          type="checkbox"
+                          checked={selectedHistoryIds.has(h.id)}
+                          onChange={() => toggleHistorySelect(h.id)}
+                        />
+                      </td>
+                      <td>{h.applicants?.name || '(이름없음)'}</td>
+                      <td>{h.applicants?.target_job || '-'}</td>
+                      <td>{h.rounded_years}년차 ({Number(h.total_recognized_years).toFixed(2)}년)</td>
+                      <td>{new Date(h.calculated_at).toLocaleDateString('ko-KR')}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
       </div>
     </div>
   )

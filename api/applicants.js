@@ -19,13 +19,41 @@ export default async function handler(req, res) {
     try {
       const { data, error } = await supabase
         .from('calculation_results')
-        .select('id, applicant_id, total_recognized_years, rounded_years, calculated_at, applicants(name)')
+        .select('id, applicant_id, total_recognized_years, rounded_years, calculated_at, applicants(name, target_job)')
         .order('calculated_at', { ascending: false })
         .limit(15)
       if (error) return res.status(500).json({ error: error.message })
       return res.status(200).json({ history: data || [] })
     } catch (err) {
       return res.status(500).json({ error: '이력 조회 중 오류: ' + err.message, cause: err.cause ? String(err.cause) : null })
+    }
+  }
+
+  if (req.method === 'DELETE') {
+    const { calculationResultIds } = req.body || {}
+    if (!Array.isArray(calculationResultIds) || calculationResultIds.length === 0) {
+      return res.status(400).json({ error: '삭제할 항목이 지정되지 않았습니다.' })
+    }
+    try {
+      // 지정된 산출결과에 연결된 지원자(applicant)를 찾아 지원자 단위로 삭제한다.
+      // applicants 삭제 시 career_entries/calculation_results가 CASCADE로 함께 삭제되도록 스키마가 설계되어 있음.
+      const { data: results, error: findErr } = await supabase
+        .from('calculation_results')
+        .select('applicant_id')
+        .in('id', calculationResultIds)
+      if (findErr) return res.status(500).json({ error: '삭제 대상 조회 실패: ' + findErr.message })
+
+      const applicantIds = [...new Set((results || []).map((r) => r.applicant_id))]
+      if (applicantIds.length === 0) {
+        return res.status(200).json({ success: true, deleted: 0 })
+      }
+
+      const { error: delErr } = await supabase.from('applicants').delete().in('id', applicantIds)
+      if (delErr) return res.status(500).json({ error: '삭제 실패: ' + delErr.message })
+
+      return res.status(200).json({ success: true, deleted: applicantIds.length })
+    } catch (err) {
+      return res.status(500).json({ error: '삭제 중 오류: ' + err.message })
     }
   }
 

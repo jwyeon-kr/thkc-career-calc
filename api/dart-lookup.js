@@ -5,17 +5,15 @@
 // 중요: DART는 "상장사 + 외부감사 대상 비상장사"만 데이터를 제공한다.
 // 조회 실패는 오류가 아니라 정상적인 상황(소규모 비상장기업)이므로,
 // 이 경우 절대 임의의 값을 추정하지 않고 명시적으로 실패를 반환한다.
+//
+// 회사명 매칭은 Supabase에 미리 저장해둔 캐시 테이블(dart_corp_codes)만 조회한다.
+// (매번 10만 건 이상의 전체 목록을 다운로드/파싱하면 서버가 타임아웃/메모리 부족으로 죽는 문제가 있어
+//  /api/dart-refresh-cache 로 미리 채워둔 캐시만 빠르게 조회하는 방식으로 변경함)
 
-import JSZip from 'jszip'
-import { XMLParser } from 'fast-xml-parser'
+import { createClient } from '@supabase/supabase-js'
 
 const REVENUE_ACCOUNT_NAMES = ['매출액', '수익(매출액)', '영업수익', '매출']
 const STATEMENT_TYPES = new Set(['IS', 'CIS']) // 손익계산서 / 포괄손익계산서
-
-// corpCode 목록은 자주 바뀌지 않으므로 서버리스 함수 warm 상태 동안 메모리 캐시
-let corpListCache = null
-let corpListCachedAt = 0
-const CACHE_TTL_MS = 12 * 60 * 60 * 1000 // 12시간
 
 function normalizeName(name) {
   return (name || '')
@@ -25,37 +23,29 @@ function normalizeName(name) {
     .toLowerCase()
 }
 
-async function loadCorpList(apiKey) {
-  const now = Date.now()
-  if (corpListCache && now - corpListCachedAt < CACHE_TTL_MS) {
-    return corpListCache
-  }
-  const res = await fetch(`https://opendart.fss.or.kr/api/corpCode.xml?crtfc_key=${apiKey}`)
-  if (!res.ok) throw new Error('DART corpCode 조회 실패 (네트워크/인증키 확인 필요)')
-  const buf = await res.arrayBuffer()
-  const zip = await JSZip.loadAsync(buf)
-  const xmlFile = zip.file('CORPCODE.xml')
-  if (!xmlFile) throw new Error('corpCode.xml 파일을 zip에서 찾을 수 없습니다')
-  const xmlText = await xmlFile.async('text')
-  const parser = new XMLParser({ parseTagValue: false }) // 숫자로 보이는 종목코드가 자동 숫자변환되어 .trim() 호출 시 오류나던 버그 수정
-  const parsed = parser.parse(xmlText)
-  const list = parsed?.result?.list || []
-  corpListCache = Array.isArray(list) ? list : [list]
-  corpListCachedAt = now
-  return corpListCache
-}
-
-function findCandidates(corpList, inputName) {
+async function findCandidatesFromCache(supabase, inputName) {
   const target = normalizeName(inputName)
-  if (!target) return []
+  if (!target) return { candidates: [], cacheEmpty: false }
 
-  const exact = corpList.filter((c) => normalizeName(c.corp_name) === target)
-  if (exact.length > 0) return exact
+  // 캐시 테이블이 비어있는지 먼저 확인 (아직 /api/dart-refresh-cache를 한 번도 안 돌린 경우 안내하기 위함)
+  const { count } = await supabase.from('dart_corp_codes').select('*', { count: 'exact', head: true })
+  if (!count) return { candidates: [], cacheEmpty: true }
 
-  const partial = corpList.filter(
+  // ilike로 넓게 후보를 가져온 뒤, 공백/㈜ 등을 뗀 정규화 비교로 정확히 다시 거름
+  const { data, error } = await supabase
+    .from('dart_corp_codes')
+    .select('corp_code, corp_name, stock_code')
+    .ilike('corp_name', `%${inputName.trim()}%`)
+    .limit(50)
+  if (error) throw new Error('캐시 조회 오류: ' + error.message)
+
+  const exact = data.filter((c) => normalizeName(c.corp_name) === target)
+  if (exact.length > 0) return { candidates: exact, cacheEmpty: false }
+
+  const partial = data.filter(
     (c) => normalizeName(c.corp_name).includes(target) || target.includes(normalizeName(c.corp_name))
   )
-  return partial.slice(0, 8)
+  return { candidates: partial.slice(0, 8), cacheEmpty: false }
 }
 
 function mapCorpCls(code) {
@@ -107,22 +97,37 @@ export default async function handler(req, res) {
   const explicitCorpCode = req.method === 'GET' ? req.query.corp_code : req.body?.corp_code
 
   const apiKey = process.env.DART_API_KEY
-  if (!apiKey) {
-    return res.status(500).json({ error: 'DART_API_KEY가 서버에 설정되어 있지 않습니다.' })
-  }
+  const supabaseUrl = (process.env.SUPABASE_URL || '').trim()
+  const supabaseKey = (process.env.SUPABASE_ANON_KEY || '').trim()
+  if (!apiKey) return res.status(500).json({ error: 'DART_API_KEY가 서버에 설정되어 있지 않습니다.' })
+  if (!supabaseUrl || !supabaseKey) return res.status(500).json({ error: 'SUPABASE_URL/SUPABASE_ANON_KEY가 설정되어 있지 않습니다.' })
+
+  const supabase = createClient(supabaseUrl, supabaseKey)
 
   try {
-    const corpList = await loadCorpList(apiKey)
-
     let corp
+
     if (explicitCorpCode) {
-      corp = corpList.find((c) => c.corp_code === explicitCorpCode)
-      if (!corp) return res.status(200).json({ found: false, reason: '선택한 회사 코드를 찾을 수 없습니다.' })
+      const { data, error } = await supabase
+        .from('dart_corp_codes')
+        .select('corp_code, corp_name, stock_code')
+        .eq('corp_code', explicitCorpCode)
+        .maybeSingle()
+      if (error) throw new Error('캐시 조회 오류: ' + error.message)
+      if (!data) return res.status(200).json({ found: false, reason: '선택한 회사 코드를 찾을 수 없습니다.' })
+      corp = data
     } else {
       if (!companyName || !companyName.trim()) {
         return res.status(400).json({ error: '회사명이 필요합니다.' })
       }
-      const candidates = findCandidates(corpList, companyName)
+      const { candidates, cacheEmpty } = await findCandidatesFromCache(supabase, companyName)
+
+      if (cacheEmpty) {
+        return res.status(200).json({
+          found: false,
+          reason: '회사목록 캐시가 아직 준비되지 않았습니다. 관리자가 /api/dart-refresh-cache를 먼저 실행해야 합니다. 지금은 매출구간을 직접 선택해주세요.',
+        })
+      }
 
       if (candidates.length === 0) {
         return res.status(200).json({

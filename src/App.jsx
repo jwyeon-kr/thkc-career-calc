@@ -16,20 +16,19 @@ function newEntry() {
     start_date: '',
     end_date: '',
     employment_type: '정규직',
-    job_match: '',       // '' = 미확인 (담당자가 직접 판단하거나 AI 제안을 받아야 함)
-    industry_match: '',  // '' = 미확인
-    revenue_bracket: '', // '' = 미입력 (필수 아님, 비어있으면 매출 가산 0%로 계산)
+    job_match: '',
+    industry_match: '',
+    revenue_bracket: '',
     revenue_source: 'manual',
     revenue_raw_value: '',
-    is_conglomerate_affiliate: false, // 대기업 계열사 담당자 확인 시 체크 -> 매출액과 무관하게 기업규모 '대기업' 고정
-    care_domain_confirmed: false, // 돌봄/장기요양기관 특례 대상 담당자 확인 시 체크 -> 별도 고정 가산율 적용
+    is_conglomerate_affiliate: false,
+    care_domain_confirmed: false,
     leadership_start_date: '',
     leadership_end_date: '',
     listed_bonus_eligible_job: false,
     listed_bonus_confirmed: false,
-    job_title: '', // 정형입력 시 직무매칭 AI제안용 (DB 저장 안 함, 화면 전용)
-    // 아래는 화면 표시용 임시 상태 (DB 저장 안 함)
-    revenue_lookup_status: 'idle', // idle | loading | success | failed | ambiguous
+    job_title: '',
+    revenue_lookup_status: 'idle',
     revenue_lookup_message: '',
     revenue_lookup_candidates: [],
     is_listed_hint: null,
@@ -38,7 +37,6 @@ function newEntry() {
   }
 }
 
-// 이력 상세보기(이력 관리 탭)에서 경력사항 한 건의 판단항목/계산breakdown을 보여주는 컴포넌트
 function HistoryEntryDetail({ entry }) {
   const c = entry.calc || {}
   return (
@@ -71,8 +69,29 @@ function HistoryEntryDetail({ entry }) {
   )
 }
 
+// 인정경력년차 + 직무군으로 저장된 연봉밴드에서 해당 구간을 찾는다.
+// 테이블에 있는 최대 년차보다 크면 "임원급, 데이터 없음"으로 처리(회사 방침: 22~25년차는 임원급이라 채용 대상이 거의 없어 데이터 미비 허용)
+function findSalaryBand(bands, roundedYears, category) {
+  if (!bands || bands.length === 0 || !category) return null
+  const maxYear = Math.max(...bands.map((b) => b.year_num))
+  const clampedYear = Math.min(roundedYears, maxYear)
+  const row = bands.find((b) => b.year_num === clampedYear && b.category === category)
+  if (!row) return { noData: true, executive: roundedYears > maxYear }
+  if (row.min_salary == null || row.max_salary == null) {
+    return { noData: true, executive: true, grade: row.grade }
+  }
+  return {
+    noData: false,
+    grade: row.grade,
+    step: row.step,
+    minSalary: row.min_salary,
+    maxSalary: row.max_salary,
+    exceededTable: roundedYears > maxYear,
+  }
+}
+
 export default function App() {
-  const [mainTab, setMainTab] = useState('calc') // calc | history
+  const [mainTab, setMainTab] = useState('calc') // calc | history | salary
   const [applicantName, setApplicantName] = useState('')
   const [targetJob, setTargetJob] = useState('')
   const [firstEntry] = useState(() => newEntry())
@@ -80,7 +99,7 @@ export default function App() {
   const [expandedIds, setExpandedIds] = useState(() => new Set([firstEntry.id]))
   const [config, setConfig] = useState(null)
   const [result, setResult] = useState(null)
-  const [tab, setTab] = useState('upload') // manual | upload
+  const [tab, setTab] = useState('upload')
   const [uploading, setUploading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [history, setHistory] = useState([])
@@ -95,8 +114,19 @@ export default function App() {
   const [selectedHistoryIds, setSelectedHistoryIds] = useState(new Set())
   const [historyDeleting, setHistoryDeleting] = useState(false)
   const [expandedHistoryIds, setExpandedHistoryIds] = useState(new Set())
+
+  // 연봉밴드 관련 상태
+  const [salaryBands, setSalaryBands] = useState([])
+  const [salaryLastUpload, setSalaryLastUpload] = useState(null)
+  const [salaryUploading, setSalaryUploading] = useState(false)
+  const [salaryMsg, setSalaryMsg] = useState('')
+  const [matchedCategory, setMatchedCategory] = useState(null)
+  const [categoryMatching, setCategoryMatching] = useState(false)
+  const [salaryBandResult, setSalaryBandResult] = useState(null)
+
   const resultRef = useRef(null)
   const fileInputRef = useRef(null)
+  const salaryFileInputRef = useRef(null)
 
   useEffect(() => {
     loadWeightConfig().then((c) => {
@@ -108,6 +138,7 @@ export default function App() {
       }
     })
     loadHistory()
+    loadSalaryBands()
   }, [])
 
   async function loadHistory() {
@@ -118,6 +149,46 @@ export default function App() {
     } catch {
       setHistory([])
     }
+  }
+
+  async function loadSalaryBands() {
+    try {
+      const res = await fetch('/api/salary-band')
+      const data = await safeJson(res)
+      setSalaryBands(data.bands || [])
+      setSalaryLastUpload(data.lastUpload || null)
+    } catch {
+      setSalaryBands([])
+    }
+  }
+
+  async function handleSalaryUpload(e) {
+    const file = e.target.files[0]
+    if (!file) return
+    setSalaryUploading(true)
+    setSalaryMsg('')
+    try {
+      const arrayBuffer = await file.arrayBuffer()
+      const base64 = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)))
+      const res = await fetch('/api/salary-band', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fileBase64: base64, filename: file.name }),
+      })
+      const data = await safeJson(res)
+      if (data.error) throw new Error(data.error)
+      setSalaryMsg(`업로드 완료: ${data.inserted}건 저장되었습니다.`)
+      loadSalaryBands()
+    } catch (err) {
+      setSalaryMsg('업로드 실패: ' + err.message)
+    } finally {
+      setSalaryUploading(false)
+      if (salaryFileInputRef.current) salaryFileInputRef.current.value = ''
+    }
+  }
+
+  function downloadSalaryXlsx() {
+    window.open('/api/salary-band?format=xlsx', '_blank')
   }
 
   function updateEntry(id, field, value) {
@@ -156,7 +227,7 @@ export default function App() {
       if (data.error) throw new Error(data.error)
       setSettingsMsg('저장되었습니다.')
       loadSettings()
-      loadWeightConfig().then(setConfig) // 화면의 계산 로직도 즉시 최신값으로 갱신
+      loadWeightConfig().then(setConfig)
     } catch (err) {
       setSettingsMsg('저장 실패: ' + err.message)
     } finally {
@@ -169,7 +240,6 @@ export default function App() {
     setShowSettings(next)
     if (next && !settings) loadSettings()
   }
-
 
   function toggleHistorySelect(id) {
     setSelectedHistoryIds((prev) => {
@@ -266,7 +336,6 @@ export default function App() {
     if (!file) return
     setUploading(true)
     try {
-      // 1단계: Supabase Storage에 직접 업로드할 수 있는 1회용 서명 URL 발급
       const urlRes = await fetch('/api/get-upload-url', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -279,8 +348,6 @@ export default function App() {
         return
       }
 
-      // 2단계: 브라우저가 우리 서버를 거치지 않고 Supabase Storage로 파일을 직접 전송
-      // (여기서 우리 서버의 4.5MB 요청 크기 제한을 완전히 우회하게 됨)
       const putRes = await fetch(urlData.signedUrl, {
         method: 'PUT',
         headers: { 'Content-Type': file.type || 'application/octet-stream' },
@@ -292,7 +359,6 @@ export default function App() {
         return
       }
 
-      // 3단계: 서버에게 "이 경로의 파일을 분석해줘"라고 요청 (작은 JSON 요청이라 용량 문제 없음)
       const res = await fetch('/api/extract', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -317,7 +383,7 @@ export default function App() {
       }))
       if (extracted.length > 0) {
         setEntries(extracted)
-        setExpandedIds(new Set()) // 추출된 항목은 요약만 보이도록 접어서 시작 (필요한 것만 펼쳐 확인)
+        setExpandedIds(new Set())
       }
       setTab('manual')
     } catch (err) {
@@ -327,7 +393,6 @@ export default function App() {
     }
   }
 
-  // 서버가 JSON이 아닌 응답(오류 페이지 등)을 돌려줘도 화면이 알아볼 수 없는 메시지로 죽지 않도록 방어
   async function safeJson(res) {
     const text = await res.text()
     try {
@@ -390,7 +455,8 @@ export default function App() {
       updateEntry(entryId, 'revenue_lookup_message', '조회 중 오류: ' + err.message)
     }
   }
-  function runCalculation() {
+
+  async function runCalculation() {
     if (!config) return
     const validEntries = entries.filter((e) => e.company_name && e.start_date && e.end_date)
     if (validEntries.length === 0) {
@@ -398,7 +464,6 @@ export default function App() {
       return
     }
 
-    // 매출구간/돌봄도메인은 필수 항목이 아님 (미입력이면 해당 가산 0%로 계산됨)
     const unconfirmed = validEntries.filter((e) => !e.job_match || !e.industry_match)
     if (unconfirmed.length > 0) {
       const names = unconfirmed.map((e) => e.company_name).join(', ')
@@ -410,6 +475,30 @@ export default function App() {
 
     const r = calcAll(validEntries, config)
     setResult(r)
+    setSalaryBandResult(null)
+    setMatchedCategory(null)
+
+    // 계산 직후, 지원 직무 텍스트로 연봉밴드 직무군을 AI가 자동 분류하고 예상 직급/연봉범위를 매칭
+    if (targetJob.trim() && salaryBands.length > 0) {
+      setCategoryMatching(true)
+      try {
+        const res = await fetch('/api/match-job-category', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ targetJob }),
+        })
+        const data = await safeJson(res)
+        if (!data.error && data.category) {
+          setMatchedCategory(data.category)
+          const band = findSalaryBand(salaryBands, r.roundedYears, data.category)
+          setSalaryBandResult(band)
+        }
+      } catch {
+        // 연봉밴드 매칭 실패는 경력산출 결과 자체에는 영향 없음 (참고 정보이므로)
+      } finally {
+        setCategoryMatching(false)
+      }
+    }
   }
 
   async function saveResult() {
@@ -444,8 +533,6 @@ export default function App() {
 
   async function exportPdf() {
     if (!resultRef.current) return
-    // jsPDF의 기본 폰트는 한글을 지원하지 않아 pdf.text()로 한글을 쓰면 깨짐.
-    // 제목까지 포함한 화면을 통째로 캡처(이미지화)하여 폰트 문제를 원천 차단.
     const titleDiv = document.createElement('div')
     titleDiv.style.cssText = 'font-size:18px; font-weight:700; font-family:"Malgun Gothic","맑은 고딕",sans-serif; padding:0 0 12px 0; background:#fff;'
     titleDiv.textContent = `경력산출 결과 - ${applicantName || '지원자'}`
@@ -468,11 +555,12 @@ export default function App() {
   return (
     <div className="container">
       <h1>경력산출 자동화 시스템</h1>
-      <div className="subtitle">인사기획팀 내부 전용 · v2026-08-16-01 (이력 관리 탭 분리)</div>
+      <div className="subtitle">인사기획팀 내부 전용 · v2026-08-16-02 (연봉밴드 매칭 추가)</div>
 
       <div className="tab-group" style={{ marginBottom: 20 }}>
         <button className={mainTab === 'calc' ? 'active' : ''} onClick={() => setMainTab('calc')}>경력산출</button>
         <button className={mainTab === 'history' ? 'active' : ''} onClick={() => { setMainTab('history'); loadHistory() }}>이력 관리 {history.length > 0 ? `(${history.length})` : ''}</button>
+        <button className={mainTab === 'salary' ? 'active' : ''} onClick={() => { setMainTab('salary'); loadSalaryBands() }}>연봉밴드</button>
       </div>
 
       {mainTab === 'calc' && (
@@ -628,7 +716,6 @@ export default function App() {
             </div>
           )}
 
-          {/* 1. 지원자 정보 + 업로드 */}
           <div className="card">
             <h2>1. 지원자 정보</h2>
             <p className="upload-first-hint">📄 이력서부터 업로드해주세요 — 이름 등 기본정보가 자동으로 채워집니다.</p>
@@ -662,7 +749,6 @@ export default function App() {
             </div>
           </div>
 
-          {/* 2. 경력사항 */}
           <div className="card">
             <h2>2. 경력사항</h2>
             <button type="button" className="criteria-toggle" onClick={() => setShowCriteria((v) => !v)}>
@@ -715,6 +801,10 @@ export default function App() {
                 <h4>반올림(년차 환산) 규칙</h4>
                 <ul>
                   <li>산출된 경력이 N.50 이하면 N년차, N.50 초과면 N+1년차로 환산</li>
+                </ul>
+                <h4>연봉밴드 매칭 (참고)</h4>
+                <ul>
+                  <li>계산 후 "지원 직무" 텍스트를 AI가 회사 연봉밴드의 직무군으로 자동 분류하고, 인정경력 년차와 매칭해 예상 직급·연봉범위를 함께 보여줍니다 (참고용, 최종 처우는 별도 협의)</li>
                 </ul>
               </div>
             )}
@@ -896,7 +986,6 @@ export default function App() {
             </p>
           </div>
 
-          {/* 3. 계산 결과 */}
           <div className="card">
             <h2>3. 계산 결과</h2>
             <div className="btn-row" style={{ marginTop: 0, marginBottom: 14 }}>
@@ -914,6 +1003,30 @@ export default function App() {
             {result && (
               <div ref={resultRef}>
                 <div className="result-summary">{result.roundedYears}년차 (인정경력 {result.totalYears.toFixed(2)}년)</div>
+
+                {categoryMatching && (
+                  <p style={{ fontSize: 13, color: '#888', marginTop: 8 }}>연봉밴드 매칭 중...</p>
+                )}
+                {!categoryMatching && salaryBands.length === 0 && (
+                  <p style={{ fontSize: 13, color: '#888', marginTop: 8 }}>연봉밴드 데이터가 업로드되지 않아 예상 직급/연봉은 표시되지 않습니다 ("연봉밴드" 탭에서 업로드 가능).</p>
+                )}
+                {!categoryMatching && salaryBandResult && (
+                  <div className="salary-band-result">
+                    <div style={{ fontSize: 12, color: '#888', marginBottom: 4 }}>지원 직무 → 직무군 자동분류: <b>{matchedCategory}</b></div>
+                    {salaryBandResult.noData ? (
+                      <div style={{ color: '#9a6b16' }}>
+                        {salaryBandResult.executive ? `임원급(${salaryBandResult.grade || '이사 이상'}) 구간으로, 연봉밴드 데이터가 준비되어 있지 않습니다.` : '해당 구간의 연봉밴드 데이터가 없습니다.'}
+                      </div>
+                    ) : (
+                      <div className="salary-band-box">
+                        <span>예상 직급: <b>{salaryBandResult.grade}{salaryBandResult.step}호봉</b></span>
+                        <span>예상 연봉범위: <b>{salaryBandResult.minSalary.toLocaleString('ko-KR')}천원 ~ {salaryBandResult.maxSalary.toLocaleString('ko-KR')}천원</b></span>
+                        {salaryBandResult.exceededTable && <span style={{ color: '#9a6b16' }}>(테이블 최대 년차를 초과해 최대 구간 기준으로 표시됨)</span>}
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 <table style={{ marginTop: 14 }}>
                   <thead>
                     <tr><th>회사명</th><th>기간</th><th>인정연수</th><th>비고</th></tr>
@@ -1010,6 +1123,60 @@ export default function App() {
                 </table>
               </div>
             </>
+          )}
+        </div>
+      )}
+
+      {mainTab === 'salary' && (
+        <div className="card">
+          <h2>연봉밴드 관리</h2>
+          <p style={{ fontSize: 12, color: '#888', marginBottom: 12 }}>
+            인사기획팀에서 관리하는 직급/연봉밴드 엑셀을 업로드하면, 경력산출 결과(인정경력 년차)와 지원 직무를 매칭해 예상 직급·연봉범위를 자동으로 보여줍니다.
+            업데이트 시 새 엑셀을 다시 업로드하면 기존 데이터를 전부 교체합니다.
+          </p>
+          <div className="btn-row" style={{ marginTop: 0, marginBottom: 10 }}>
+            <button onClick={() => salaryFileInputRef.current?.click()} disabled={salaryUploading}>
+              {salaryUploading ? '업로드 중...' : '엑셀 업로드'}
+            </button>
+            <button className="secondary" onClick={downloadSalaryXlsx} disabled={salaryBands.length === 0}>
+              현재 데이터 엑셀 다운로드
+            </button>
+            <input
+              ref={salaryFileInputRef}
+              type="file"
+              accept=".xlsx,.xls"
+              style={{ display: 'none' }}
+              onChange={handleSalaryUpload}
+            />
+          </div>
+          {salaryMsg && <p style={{ fontSize: 13, color: salaryMsg.includes('실패') ? '#d0342c' : '#16794f', marginBottom: 10 }}>{salaryMsg}</p>}
+          {salaryLastUpload && (
+            <p style={{ fontSize: 12, color: '#888', marginBottom: 10 }}>
+              마지막 업로드: {salaryLastUpload.filename || '(파일명 없음)'} · {new Date(salaryLastUpload.uploaded_at).toLocaleString('ko-KR')} · {salaryLastUpload.row_count}건
+            </p>
+          )}
+
+          {salaryBands.length === 0 && <p style={{ color: '#888', fontSize: 13 }}>업로드된 연봉밴드 데이터가 없습니다.</p>}
+          {salaryBands.length > 0 && (
+            <div style={{ overflowX: 'auto' }}>
+              <table>
+                <thead>
+                  <tr><th>직급</th><th>년차</th><th>호봉</th><th>직무군</th><th>MIN(천원)</th><th>MAX(천원)</th></tr>
+                </thead>
+                <tbody>
+                  {salaryBands.map((row) => (
+                    <tr key={row.id}>
+                      <td>{row.grade}</td>
+                      <td>{row.year_num}년차</td>
+                      <td>{row.step}</td>
+                      <td>{row.category}</td>
+                      <td>{row.min_salary != null ? row.min_salary.toLocaleString('ko-KR') : '-'}</td>
+                      <td>{row.max_salary != null ? row.max_salary.toLocaleString('ko-KR') : '-'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
         </div>
       )}

@@ -55,7 +55,9 @@ function mapCorpCls(code) {
 
 async function fetchCompanyOverview(apiKey, corpCode) {
   try {
-    const res = await fetch(`https://opendart.fss.or.kr/api/company.json?crtfc_key=${apiKey}&corp_code=${corpCode}`)
+    const res = await fetch(`https://opendart.fss.or.kr/api/company.json?crtfc_key=${apiKey}&corp_code=${corpCode}`, {
+      signal: AbortSignal.timeout(15000),
+    })
     if (!res.ok) return null
     const data = await res.json()
     if (data.status !== '000') return null
@@ -74,7 +76,12 @@ async function fetchRevenue(apiKey, corpCode) {
 
   for (const year of yearsToTry) {
     const url = `https://opendart.fss.or.kr/api/fnlttSinglAcnt.json?crtfc_key=${apiKey}&corp_code=${corpCode}&bsns_year=${year}&reprt_code=11011`
-    const res = await fetch(url)
+    let res
+    try {
+      res = await fetch(url, { signal: AbortSignal.timeout(15000) })
+    } catch {
+      continue // 특정 연도 조회가 응답 없으면 건너뛰고 다음 연도 시도
+    }
     if (!res.ok) continue
     const data = await res.json()
     if (data.status !== '000' || !Array.isArray(data.list)) continue

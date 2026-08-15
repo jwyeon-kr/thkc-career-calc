@@ -33,8 +33,15 @@ function extractCorpListFast(xmlText) {
 async function fetchAllRows(apiKey, timing) {
   console.log('[dart-refresh] 1. DART 다운로드 시작')
   const t0 = Date.now()
-  const dartRes = await fetch(`https://opendart.fss.or.kr/api/corpCode.xml?crtfc_key=${apiKey}`)
-  if (!dartRes.ok) throw new Error('DART corpCode 다운로드 실패')
+  let dartRes
+  try {
+    dartRes = await fetch(`https://opendart.fss.or.kr/api/corpCode.xml?crtfc_key=${apiKey}`, {
+      signal: AbortSignal.timeout(20000), // 20초 안에 응답 없으면 명확히 실패 처리 (무한대기 방지)
+    })
+  } catch (err) {
+    throw new Error(`DART 서버 응답 없음(${Date.now() - t0}ms 대기 후 포기): ${err.name === 'TimeoutError' ? '20초 시간제한 초과' : err.message}`)
+  }
+  if (!dartRes.ok) throw new Error('DART corpCode 다운로드 실패 (HTTP ' + dartRes.status + ')')
   const buf = await dartRes.arrayBuffer()
   timing.download = Date.now() - t0
   console.log(`[dart-refresh] 2. 다운로드 완료 (${timing.download}ms, ${buf.byteLength}바이트)`)

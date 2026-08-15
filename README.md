@@ -15,6 +15,17 @@ Vercel 프로젝트 Settings → Environment Variables 에 아래 6개 등록:
 
 > **변경사항**: 이전 버전에서는 브라우저가 Supabase에 직접 접속했으나(`VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`), 특정 네트워크 환경에서 연결 실패가 반복되어 **모든 Supabase 접근을 서버함수(`/api/config`, `/api/applicants`) 경유로 변경**했습니다. 기존 `VITE_SUPABASE_URL`/`VITE_SUPABASE_ANON_KEY` 환경변수는 더 이상 사용하지 않으므로 삭제하셔도 되고, 이름만 `SUPABASE_URL`/`SUPABASE_ANON_KEY`(VITE_ 접두어 제거)로 다시 등록하시면 됩니다. 값 자체는 동일합니다.
 
+## Storage 버킷 설정 (최초 1회 필요, 이력서 업로드 기능용)
+
+Vercel 서버 함수는 요청 본문 크기가 약 4.5MB로 고정 제한되어 있어(설정으로 변경 불가), 대용량 이력서 파일은 브라우저가 Supabase Storage에 직접 업로드한 뒤 서버가 그 파일을 가져다 처리하는 방식으로 되어 있습니다. 아래 설정이 안 되어 있으면 이력서 업로드가 실패합니다.
+
+1. Supabase 대시보드 → Storage → New bucket → 이름 `resumes`, **Public 체크 해제** → 생성
+2. `storage_setup.sql` 내용을 Supabase SQL Editor에서 실행 (버킷 접근 정책 추가)
+
+## DART 정기 자동갱신 (Cron)
+
+`vercel.json`에 매일 UTC 19:00(한국시간 새벽 4시) 자동 실행되도록 설정되어 있습니다. Vercel 무료 플랜은 Cron이 하루 1회로 제한됩니다.
+
 ## 로컬 실행 (선택)
 
 ```

@@ -9,7 +9,11 @@
       "memory": 1024
     },
     "api/extract.js": {
-      "maxDuration": 60
+      "maxDuration": 60,
+      "memory": 1024
+    },
+    "api/get-upload-url.js": {
+      "maxDuration": 15
     }
   },
   "crons": [

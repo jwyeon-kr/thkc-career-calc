@@ -2,14 +2,42 @@
 // 이력서 파일(PDF/이미지, base64)을 받아 Anthropic API로 경력 정보를 구조화 추출한다.
 // ANTHROPIC_API_KEY는 서버 환경변수로만 존재하며 프론트엔드에 노출되지 않는다.
 
+// Vercel Serverless Function
+// Supabase Storage에 업로드된 이력서 파일(storagePath)을 서버에서 직접 내려받아
+// Anthropic API로 경력 정보를 구조화 추출한다.
+// (예전에는 브라우저가 base64로 인코딩해 직접 보냈으나, Vercel 서버 함수의 요청 본문 크기
+//  제한(약 4.5MB, 변경 불가)에 걸려 대용량 파일이 실패하는 문제가 있어 이 방식으로 변경함)
+
+import { createClient } from '@supabase/supabase-js'
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'POST만 허용됩니다.' })
   }
 
-  const { base64Data, mediaType, targetJob } = req.body
-  if (!base64Data || !mediaType) {
-    return res.status(400).json({ error: 'base64Data, mediaType이 필요합니다.' })
+  const { storagePath, mediaType, targetJob } = req.body
+  if (!storagePath || !mediaType) {
+    return res.status(400).json({ error: 'storagePath, mediaType이 필요합니다.' })
+  }
+
+  const supabaseUrl = (process.env.SUPABASE_URL || '').trim()
+  const supabaseKey = (process.env.SUPABASE_ANON_KEY || '').trim()
+  if (!supabaseUrl || !supabaseKey) {
+    return res.status(500).json({ error: 'SUPABASE_URL/SUPABASE_ANON_KEY가 설정되어 있지 않습니다.' })
+  }
+
+  let base64Data
+  try {
+    const supabase = createClient(supabaseUrl, supabaseKey)
+    const { data: fileBlob, error: dlErr } = await supabase.storage.from('resumes').download(storagePath)
+    if (dlErr) throw new Error('업로드된 파일을 가져오지 못했습니다: ' + dlErr.message)
+    const arrayBuffer = await fileBlob.arrayBuffer()
+    base64Data = Buffer.from(arrayBuffer).toString('base64')
+
+    // 처리 끝난 원본 파일은 서버 임시저장 용도라 바로 정리 (실패해도 추출은 계속 진행)
+    supabase.storage.from('resumes').remove([storagePath]).catch(() => {})
+  } catch (err) {
+    return res.status(500).json({ error: err.message })
   }
 
   const isPdf = mediaType === 'application/pdf'

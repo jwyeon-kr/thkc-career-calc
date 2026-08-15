@@ -77,7 +77,7 @@ export default function App() {
   async function loadHistory() {
     try {
       const res = await fetch('/api/applicants')
-      const data = await res.json()
+      const data = await safeJson(res)
       setHistory(data.history || [])
     } catch {
       setHistory([])
@@ -91,7 +91,7 @@ export default function App() {
   async function loadSettings() {
     try {
       const res = await fetch('/api/settings')
-      const data = await res.json()
+      const data = await safeJson(res)
       if (data.error) {
         setSettingsMsg('불러오기 실패: ' + data.error)
         return
@@ -116,7 +116,7 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ table, match, weight_percent: num }),
       })
-      const data = await res.json()
+      const data = await safeJson(res)
       if (data.error) throw new Error(data.error)
       setSettingsMsg('저장되었습니다.')
       loadSettings()
@@ -154,7 +154,7 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ calculationResultIds: [...selectedHistoryIds] }),
       })
-      const data = await res.json()
+      const data = await safeJson(res)
       if (data.error) throw new Error(data.error)
       setSelectedHistoryIds(new Set())
       loadHistory()
@@ -182,7 +182,7 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ targetJob, jobTitle: entry.job_title }),
       })
-      const data = await res.json()
+      const data = await safeJson(res)
       if (data.error) throw new Error(data.error)
       updateEntry(entryId, 'job_match', data.job_match_suggestion)
     } catch (err) {
@@ -221,13 +221,39 @@ export default function App() {
     if (!file) return
     setUploading(true)
     try {
-      const base64 = await fileToBase64(file)
+      // 1단계: Supabase Storage에 직접 업로드할 수 있는 1회용 서명 URL 발급
+      const urlRes = await fetch('/api/get-upload-url', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filename: file.name }),
+      })
+      const urlData = await safeJson(urlRes)
+      if (urlData.error) {
+        alert('업로드 준비 실패: ' + urlData.error + '\n정형 입력으로 직접 입력해주세요.')
+        setTab('manual')
+        return
+      }
+
+      // 2단계: 브라우저가 우리 서버를 거치지 않고 Supabase Storage로 파일을 직접 전송
+      // (여기서 우리 서버의 4.5MB 요청 크기 제한을 완전히 우회하게 됨)
+      const putRes = await fetch(urlData.signedUrl, {
+        method: 'PUT',
+        headers: { 'Content-Type': file.type || 'application/octet-stream' },
+        body: file,
+      })
+      if (!putRes.ok) {
+        alert('파일 업로드 실패 (파일이 너무 크거나 네트워크 문제일 수 있습니다). 정형 입력으로 직접 입력해주세요.')
+        setTab('manual')
+        return
+      }
+
+      // 3단계: 서버에게 "이 경로의 파일을 분석해줘"라고 요청 (작은 JSON 요청이라 용량 문제 없음)
       const res = await fetch('/api/extract', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ base64Data: base64, mediaType: file.type, targetJob }),
+        body: JSON.stringify({ storagePath: urlData.path, mediaType: file.type, targetJob }),
       })
-      const data = await res.json()
+      const data = await safeJson(res)
       if (data.error) {
         alert('추출 실패: ' + data.error + '\n정형 입력으로 직접 입력해주세요.')
         setTab('manual')
@@ -255,13 +281,14 @@ export default function App() {
     }
   }
 
-  function fileToBase64(file) {
-    return new Promise((resolve, reject) => {
-      const r = new FileReader()
-      r.onload = () => resolve(r.result.split(',')[1])
-      r.onerror = reject
-      r.readAsDataURL(file)
-    })
+  // 서버가 JSON이 아닌 응답(오류 페이지 등)을 돌려줘도 화면이 알아볼 수 없는 메시지로 죽지 않도록 방어
+  async function safeJson(res) {
+    const text = await res.text()
+    try {
+      return JSON.parse(text)
+    } catch {
+      return { error: `서버 응답을 해석할 수 없습니다 (HTTP ${res.status}): ${text.slice(0, 200)}` }
+    }
   }
 
   async function lookupRevenue(entryId, corpCode) {
@@ -277,7 +304,7 @@ export default function App() {
         ? `corp_code=${encodeURIComponent(corpCode)}`
         : `company=${encodeURIComponent(entry.company_name)}`
       const res = await fetch(`/api/dart-lookup?${params}`)
-      const data = await res.json()
+      const data = await safeJson(res)
 
       if (data.error) {
         updateEntry(entryId, 'revenue_lookup_status', 'failed')
@@ -358,7 +385,7 @@ export default function App() {
           result,
         }),
       })
-      const data = await res.json()
+      const data = await safeJson(res)
       if (data.error) throw new Error(data.error)
 
       setSaveMsg('저장 완료되었습니다.')
@@ -396,7 +423,7 @@ export default function App() {
   return (
     <div className="container">
       <h1>경력산출 자동화 시스템</h1>
-      <div className="subtitle">인사기획팀 내부 전용 · v2026-08-15-16 (DART자동갱신+직무매칭 재설계)</div>
+      <div className="subtitle">인사기획팀 내부 전용 · v2026-08-15-17 (대용량 이력서 업로드 지원)</div>
       <button type="button" className="criteria-toggle" style={{ marginBottom: 14 }} onClick={toggleSettings}>
         {showSettings ? '설정 관리 접기 ▲' : '⚙ 설정 관리 (판단기준 수치 수정)'}
       </button>

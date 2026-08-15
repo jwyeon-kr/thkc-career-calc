@@ -21,12 +21,16 @@ export default async function handler(req, res) {
     // 진단: supabase-js 라이브러리를 거치지 않고 순수 네트워크 연결 자체를 먼저 테스트
     try {
       const rawTest = await fetch(supabaseUrl + '/rest/v1/', {
-        headers: { apikey: supabaseKey },
+        headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}` },
       })
       if (!rawTest.ok && rawTest.status !== 404) {
+        const bodyText = await rawTest.text().catch(() => '')
         return res.status(500).json({
           error: `Supabase 서버 자체 접속은 되었으나 응답 상태 이상: HTTP ${rawTest.status}`,
+          cause: bodyText.slice(0, 300),
           url_used: supabaseUrl,
+          key_length: supabaseKey.length,
+          key_prefix: supabaseKey.slice(0, 12),
         })
       }
     } catch (rawErr) {

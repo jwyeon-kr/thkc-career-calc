@@ -9,6 +9,13 @@
 // 회사명 매칭은 Supabase에 미리 저장해둔 캐시 테이블(dart_corp_codes)만 조회한다.
 // (매번 10만 건 이상의 전체 목록을 다운로드/파싱하면 서버가 타임아웃/메모리 부족으로 죽는 문제가 있어
 //  /api/dart-refresh-cache 로 미리 채워둔 캐시만 빠르게 조회하는 방식으로 변경함)
+//
+// [2026-08-15 수정1] fetchRevenue: 최근 3개년(currentYear-1~3) 순차 탐색 방식에서
+// "지원 시점 기준 가장 최근 확정된 사업연도"(currentYear - 1) 단일 연도만 조회하는 방식으로 변경.
+//
+// [2026-08-15 수정2] normalizeName: 이력서에서 추출된 회사명에 "프레스티지바이오파마아이디씨㈜
+// (Prestige BioPharma IDC Co.,Ltd)"처럼 괄호 안 영문 부가설명이 붙어있으면 DART 캐시(순수 한글명)와
+// 매칭이 안 되던 버그 수정. 괄호(전각/반각) 안 내용을 전부 제거하도록 정규화 로직 강화.
 
 import { createClient } from '@supabase/supabase-js'
 
@@ -17,6 +24,7 @@ const STATEMENT_TYPES = new Set(['IS', 'CIS']) // 손익계산서 / 포괄손익
 
 function normalizeName(name) {
   return (name || '')
+    .replace(/[（(][^)）]*[)）]/g, '') // 괄호(전각/반각) 안 내용 전부 제거 - 영문 회사명, 부가설명 등
     .replace(/\(주\)|주식회사|㈜/g, '')
     .replace(/\s+/g, '')
     .trim()
@@ -71,30 +79,29 @@ async function fetchCompanyOverview(apiKey, corpCode) {
   }
 }
 
+// 지원 시점 기준 가장 최근 확정된 사업연도(currentYear - 1) 단일 연도만 조회.
+// 예: 2026년에 조회하면 2025년 사업보고서만 봄. 해당 연도 데이터가 없으면 바로 실패 반환.
 async function fetchRevenue(apiKey, corpCode) {
-  const currentYear = new Date().getFullYear()
-  const yearsToTry = [currentYear - 1, currentYear - 2, currentYear - 3]
+  const targetYear = new Date().getFullYear() - 1
 
-  for (const year of yearsToTry) {
-    const url = `https://opendart.fss.or.kr/api/fnlttSinglAcnt.json?crtfc_key=${apiKey}&corp_code=${corpCode}&bsns_year=${year}&reprt_code=11011`
-    let res
-    try {
-      res = await fetch(url, { signal: AbortSignal.timeout(15000) })
-    } catch {
-      continue // 특정 연도 조회가 응답 없으면 건너뛰고 다음 연도 시도
-    }
-    if (!res.ok) continue
-    const data = await res.json()
-    if (data.status !== '000' || !Array.isArray(data.list)) continue
+  const url = `https://opendart.fss.or.kr/api/fnlttSinglAcnt.json?crtfc_key=${apiKey}&corp_code=${corpCode}&bsns_year=${targetYear}&reprt_code=11011`
+  let res
+  try {
+    res = await fetch(url, { signal: AbortSignal.timeout(15000) })
+  } catch {
+    return null
+  }
+  if (!res.ok) return null
+  const data = await res.json()
+  if (data.status !== '000' || !Array.isArray(data.list)) return null
 
-    const revenueRow = data.list.find(
-      (row) => STATEMENT_TYPES.has(row.sj_div) && REVENUE_ACCOUNT_NAMES.includes((row.account_nm || '').trim())
-    )
-    if (revenueRow && revenueRow.thstrm_amount) {
-      const amount = Number(String(revenueRow.thstrm_amount).replace(/,/g, ''))
-      if (!isNaN(amount)) {
-        return { year, amount, accountName: revenueRow.account_nm }
-      }
+  const revenueRow = data.list.find(
+    (row) => STATEMENT_TYPES.has(row.sj_div) && REVENUE_ACCOUNT_NAMES.includes((row.account_nm || '').trim())
+  )
+  if (revenueRow && revenueRow.thstrm_amount) {
+    const amount = Number(String(revenueRow.thstrm_amount).replace(/,/g, ''))
+    if (!isNaN(amount)) {
+      return { year: targetYear, amount, accountName: revenueRow.account_nm }
     }
   }
   return null
@@ -174,7 +181,7 @@ export default async function handler(req, res) {
         market: overview?.market || null,
         established_date: overview?.establishedDate || null,
         revenue_found: false,
-        reason: '회사는 조회되었으나 최근 3개년 재무제표에서 매출액을 찾지 못했습니다. 매출구간을 직접 선택해주세요.',
+        reason: `회사는 조회되었으나 ${new Date().getFullYear() - 1}년 재무제표에서 매출액을 찾지 못했습니다. 매출구간은 필수가 아니므로 비워두고 계산을 진행할 수 있습니다.`,
       })
     }
 

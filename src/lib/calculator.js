@@ -14,7 +14,7 @@ export async function loadWeightConfig() {
         .join(' | ')
       return {
         jobIndustry: [], jobRevenue: [], employmentType: [],
-        leadershipPremium: 10, listedBonus: 10,
+        leadershipPremium: 10, listedBonus: 10, careDomainBonus: 10,
         errors: [detail], isEmpty: true,
       }
     }
@@ -26,7 +26,7 @@ export async function loadWeightConfig() {
   } catch (err) {
     return {
       jobIndustry: [], jobRevenue: [], employmentType: [],
-      leadershipPremium: 10, listedBonus: 10,
+      leadershipPremium: 10, listedBonus: 10, careDomainBonus: 10,
       errors: [err.message], isEmpty: true,
     }
   }
@@ -53,12 +53,14 @@ function overlapDays(aStart, aEnd, bStart, bEnd) {
 }
 
 // 개별 경력 1건 계산
+// [2026-08-15 수정] 돌봄도메인 특례(매출구간 치환 방식) 제거 -> care_domain_confirmed 체크 시 별도 고정 가산율 적용.
+// is_conglomerate_affiliate 체크 시 매출구간을 무조건 '대기업'으로 강제 적용.
+// revenue_bracket이 비어있으면(미입력) jrPct는 0으로 자연 처리됨 -> 매출구간 미입력 상태로도 계산 정상 진행.
 export function calcEntry(entry, config) {
   const days = daysBetween(entry.start_date, entry.end_date)
 
-  // 시니어/돌봄 도메인 "동일" 특례: 매출구간을 '당사미만'으로 완화
-  const effectiveRevenueBracket =
-    entry.care_domain_match === '동일' ? '당사미만' : entry.revenue_bracket
+  // 대기업 계열사 체크 시 매출액과 무관하게 '대기업' 등급 강제 적용
+  const effectiveRevenueBracket = entry.is_conglomerate_affiliate ? '대기업' : entry.revenue_bracket
 
   const jiPct = lookup(config.jobIndustry, {
     job_match: entry.job_match,
@@ -85,7 +87,10 @@ export function calcEntry(entry, config) {
   // 상장 가산: 담당자 컨펌된 경우에만
   const listedBonus = entry.listed_bonus_confirmed ? afterEmployment * (config.listedBonus / 100) : 0
 
-  const total = afterEmployment + leadershipBonus + listedBonus
+  // 돌봄도메인 특례 가산: 담당자 컨펌된 경우에만 (매출구간과 무관한 별도 고정 가산)
+  const careDomainBonus = entry.care_domain_confirmed ? afterEmployment * (config.careDomainBonus / 100) : 0
+
+  const total = afterEmployment + leadershipBonus + listedBonus + careDomainBonus
 
   return {
     days,
@@ -95,6 +100,7 @@ export function calcEntry(entry, config) {
     afterEmployment,
     leadershipBonus,
     listedBonus,
+    careDomainBonus,
     entryYears: total,
   }
 }

@@ -7,7 +7,7 @@ import jsPDF from 'jspdf'
 
 const EMPLOYMENT_TYPES = ['정규직', '계약직', '파견', '인턴']
 const MATCH_LEVELS = ['동일', '유사', '기타']
-const REVENUE_BRACKETS = ['3000억이상', '3000억미만', '당사미만', '+500억', '50억미만']
+const REVENUE_BRACKETS = ['중소', '중견', '대기업']
 
 function newEntry() {
   return {
@@ -18,10 +18,11 @@ function newEntry() {
     employment_type: '정규직',
     job_match: '',       // '' = 미확인 (담당자가 직접 판단하거나 AI 제안을 받아야 함)
     industry_match: '',  // '' = 미확인
-    revenue_bracket: '', // '' = 미확인
+    revenue_bracket: '', // '' = 미입력 (필수 아님, 비어있으면 매출 가산 0%로 계산)
     revenue_source: 'manual',
     revenue_raw_value: '',
-    care_domain_match: '', // '' = 미확인
+    is_conglomerate_affiliate: false, // 대기업 계열사 담당자 확인 시 체크 -> 매출액과 무관하게 기업규모 '대기업' 고정
+    care_domain_confirmed: false, // 돌봄/장기요양기관 특례 대상 담당자 확인 시 체크 -> 별도 고정 가산율 적용
     leadership_start_date: '',
     leadership_end_date: '',
     listed_bonus_eligible_job: false,
@@ -37,7 +38,41 @@ function newEntry() {
   }
 }
 
+// 이력 상세보기(이력 관리 탭)에서 경력사항 한 건의 판단항목/계산breakdown을 보여주는 컴포넌트
+function HistoryEntryDetail({ entry }) {
+  const c = entry.calc || {}
+  return (
+    <div className="history-entry-detail">
+      <div className="history-entry-detail-header">
+        <b>{entry.company_name}</b>
+        <span>{entry.start_date} ~ {entry.end_date}</span>
+        {entry.gap_flag && <span className="flag">경력단절 90일+</span>}
+      </div>
+      <div className="history-entry-detail-grid">
+        <div><span className="label">고용형태</span>{entry.employment_type}</div>
+        <div><span className="label">직무매칭</span>{entry.job_match || '미확인'}</div>
+        <div><span className="label">업종매칭</span>{entry.industry_match || '미확인'}</div>
+        <div><span className="label">기업규모</span>{entry.is_conglomerate_affiliate ? '대기업(계열사 확인)' : (entry.revenue_bracket || '미입력')}</div>
+        <div><span className="label">돌봄도메인 특례</span>{entry.care_domain_confirmed ? '적용' : '미적용'}</div>
+        <div><span className="label">상장가산</span>{entry.listed_bonus_confirmed ? '적용' : '미적용'}</div>
+        <div><span className="label">팀장기간</span>{entry.leadership_start_date && entry.leadership_end_date ? `${entry.leadership_start_date} ~ ${entry.leadership_end_date}` : '-'}</div>
+      </div>
+      {c.entryYears !== undefined && (
+        <div className="history-entry-detail-calc">
+          <span>직무×업종 {c.jiPct ?? 0}% / 직무×기업규모 {c.jrPct ?? 0}%</span>
+          <span>기본 {(c.afterEmployment ?? 0).toFixed(2)}년</span>
+          {c.leadershipBonus > 0 && <span>리더십가산 +{c.leadershipBonus.toFixed(2)}년</span>}
+          {c.listedBonus > 0 && <span>상장가산 +{c.listedBonus.toFixed(2)}년</span>}
+          {c.careDomainBonus > 0 && <span>돌봄특례 +{c.careDomainBonus.toFixed(2)}년</span>}
+          <b>계 {(c.entryYears ?? 0).toFixed(2)}년</b>
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function App() {
+  const [mainTab, setMainTab] = useState('calc') // calc | history
   const [applicantName, setApplicantName] = useState('')
   const [targetJob, setTargetJob] = useState('')
   const [firstEntry] = useState(() => newEntry())
@@ -59,6 +94,7 @@ export default function App() {
   const [settingsEdits, setSettingsEdits] = useState({})
   const [selectedHistoryIds, setSelectedHistoryIds] = useState(new Set())
   const [historyDeleting, setHistoryDeleting] = useState(false)
+  const [expandedHistoryIds, setExpandedHistoryIds] = useState(new Set())
   const resultRef = useRef(null)
   const fileInputRef = useRef(null)
 
@@ -137,6 +173,15 @@ export default function App() {
 
   function toggleHistorySelect(id) {
     setSelectedHistoryIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  function toggleHistoryExpand(id) {
+    setExpandedHistoryIds((prev) => {
       const next = new Set(prev)
       if (next.has(id)) next.delete(id)
       else next.add(id)
@@ -267,6 +312,7 @@ export default function App() {
         end_date: c.end_date || '',
         employment_type: EMPLOYMENT_TYPES.includes(c.employment_type_guess) ? c.employment_type_guess : '정규직',
         job_match: MATCH_LEVELS.includes(c.job_match_suggestion) ? c.job_match_suggestion : '',
+        job_title: c.job_title || '',
         listed_bonus_eligible_job: suggestListedBonusEligible(c.job_title || ''),
       }))
       if (extracted.length > 0) {
@@ -352,13 +398,12 @@ export default function App() {
       return
     }
 
-    const unconfirmed = validEntries.filter(
-      (e) => !e.job_match || !e.industry_match || !e.revenue_bracket || !e.care_domain_match
-    )
+    // 매출구간/돌봄도메인은 필수 항목이 아님 (미입력이면 해당 가산 0%로 계산됨)
+    const unconfirmed = validEntries.filter((e) => !e.job_match || !e.industry_match)
     if (unconfirmed.length > 0) {
       const names = unconfirmed.map((e) => e.company_name).join(', ')
       alert(
-        `아래 경력에 "미확인" 상태인 판단항목(직무매칭/업종매칭/매출구간/돌봄도메인)이 있어 계산할 수 없습니다.\n\n대상: ${names}\n\n해당 카드를 펼쳐서 항목을 확인/선택해주세요.`
+        `아래 경력에 "미확인" 상태인 판단항목(직무매칭/업종매칭)이 있어 계산할 수 없습니다.\n\n대상: ${names}\n\n해당 카드를 펼쳐서 항목을 확인/선택해주세요.`
       )
       return
     }
@@ -423,475 +468,551 @@ export default function App() {
   return (
     <div className="container">
       <h1>경력산출 자동화 시스템</h1>
-      <div className="subtitle">인사기획팀 내부 전용 · v2026-08-15-17 (대용량 이력서 업로드 지원)</div>
-      <button type="button" className="criteria-toggle" style={{ marginBottom: 14 }} onClick={toggleSettings}>
-        {showSettings ? '설정 관리 접기 ▲' : '⚙ 설정 관리 (판단기준 수치 수정)'}
-      </button>
-      {showSettings && (
-        <div className="card">
-          <h2>설정 관리 — 계산 기준 수치</h2>
-          <p style={{ fontSize: 12, color: '#888', marginTop: -6, marginBottom: 12 }}>
-            여기서 값을 바꾸면 이후 모든 계산에 즉시 반영됩니다. 신중히 수정해주세요.
-          </p>
-          {!settings && <p style={{ fontSize: 13, color: '#888' }}>불러오는 중...</p>}
-          {settingsMsg && (
-            <p style={{ fontSize: 13, color: settingsMsg.includes('실패') ? '#d0342c' : '#16794f', marginBottom: 10 }}>{settingsMsg}</p>
+      <div className="subtitle">인사기획팀 내부 전용 · v2026-08-16-01 (이력 관리 탭 분리)</div>
+
+      <div className="tab-group" style={{ marginBottom: 20 }}>
+        <button className={mainTab === 'calc' ? 'active' : ''} onClick={() => setMainTab('calc')}>경력산출</button>
+        <button className={mainTab === 'history' ? 'active' : ''} onClick={() => { setMainTab('history'); loadHistory() }}>이력 관리 {history.length > 0 ? `(${history.length})` : ''}</button>
+      </div>
+
+      {mainTab === 'calc' && (
+        <>
+          <button type="button" className="criteria-toggle" style={{ marginBottom: 14 }} onClick={toggleSettings}>
+            {showSettings ? '설정 관리 접기 ▲' : '⚙ 설정 관리 (판단기준 수치 수정)'}
+          </button>
+          {showSettings && (
+            <div className="card">
+              <h2>설정 관리 — 계산 기준 수치</h2>
+              <p style={{ fontSize: 12, color: '#888', marginTop: -6, marginBottom: 12 }}>
+                여기서 값을 바꾸면 이후 모든 계산에 즉시 반영됩니다. 신중히 수정해주세요.
+              </p>
+              {!settings && <p style={{ fontSize: 13, color: '#888' }}>불러오는 중...</p>}
+              {settingsMsg && (
+                <p style={{ fontSize: 13, color: settingsMsg.includes('실패') ? '#d0342c' : '#16794f', marginBottom: 10 }}>{settingsMsg}</p>
+              )}
+              {settings && (
+                <>
+                  <h4 style={{ fontSize: 13, marginBottom: 6 }}>직무 × 업종 매칭율 (%)</h4>
+                  <div className="settings-grid">
+                    {settings.jobIndustry.map((row) => {
+                      const key = `ji-${row.job_match}-${row.industry_match}`
+                      return (
+                        <div className="settings-row" key={key}>
+                          <span>{row.job_match} / {row.industry_match}</span>
+                          <input
+                            type="number"
+                            defaultValue={row.weight_percent}
+                            onChange={(ev) => setSettingsEdits((p) => ({ ...p, [key]: ev.target.value }))}
+                          />
+                          <button
+                            className="secondary"
+                            disabled={settingsSavingKey === key}
+                            onClick={() => saveSettingRow('job_industry_matrix', { job_match: row.job_match, industry_match: row.industry_match }, settingsEdits[key] ?? row.weight_percent, key)}
+                          >
+                            {settingsSavingKey === key ? '저장중' : '저장'}
+                          </button>
+                        </div>
+                      )
+                    })}
+                  </div>
+
+                  <h4 style={{ fontSize: 13, margin: '16px 0 6px' }}>직무 × 기업규모 매칭율 (%)</h4>
+                  <div className="settings-grid">
+                    {settings.jobRevenue.map((row) => {
+                      const key = `jr-${row.job_match}-${row.revenue_bracket}`
+                      return (
+                        <div className="settings-row" key={key}>
+                          <span>{row.job_match} / {row.revenue_bracket}</span>
+                          <input
+                            type="number"
+                            defaultValue={row.weight_percent}
+                            onChange={(ev) => setSettingsEdits((p) => ({ ...p, [key]: ev.target.value }))}
+                          />
+                          <button
+                            className="secondary"
+                            disabled={settingsSavingKey === key}
+                            onClick={() => saveSettingRow('job_revenue_matrix', { job_match: row.job_match, revenue_bracket: row.revenue_bracket }, settingsEdits[key] ?? row.weight_percent, key)}
+                          >
+                            {settingsSavingKey === key ? '저장중' : '저장'}
+                          </button>
+                        </div>
+                      )
+                    })}
+                  </div>
+
+                  <h4 style={{ fontSize: 13, margin: '16px 0 6px' }}>고용형태 계수 (%)</h4>
+                  <div className="settings-grid">
+                    {settings.employmentType.map((row) => {
+                      const key = `et-${row.employment_type}`
+                      return (
+                        <div className="settings-row" key={key}>
+                          <span>{row.employment_type}</span>
+                          <input
+                            type="number"
+                            defaultValue={row.weight_percent}
+                            onChange={(ev) => setSettingsEdits((p) => ({ ...p, [key]: ev.target.value }))}
+                          />
+                          <button
+                            className="secondary"
+                            disabled={settingsSavingKey === key}
+                            onClick={() => saveSettingRow('employment_type_weights', { employment_type: row.employment_type }, settingsEdits[key] ?? row.weight_percent, key)}
+                          >
+                            {settingsSavingKey === key ? '저장중' : '저장'}
+                          </button>
+                        </div>
+                      )
+                    })}
+                  </div>
+
+                  <h4 style={{ fontSize: 13, margin: '16px 0 6px' }}>리더십 프리미엄 / 상장가산 / 돌봄도메인 특례가산 (%)</h4>
+                  <div className="settings-grid">
+                    {settings.leadershipPremium && (
+                      <div className="settings-row">
+                        <span>리더십 프리미엄</span>
+                        <input
+                          type="number"
+                          defaultValue={settings.leadershipPremium.weight_percent}
+                          onChange={(ev) => setSettingsEdits((p) => ({ ...p, lp: ev.target.value }))}
+                        />
+                        <button
+                          className="secondary"
+                          disabled={settingsSavingKey === 'lp'}
+                          onClick={() => saveSettingRow('leadership_premium_config', { id: settings.leadershipPremium.id }, settingsEdits.lp ?? settings.leadershipPremium.weight_percent, 'lp')}
+                        >
+                          {settingsSavingKey === 'lp' ? '저장중' : '저장'}
+                        </button>
+                      </div>
+                    )}
+                    {settings.listedBonus && (
+                      <div className="settings-row">
+                        <span>상장가산</span>
+                        <input
+                          type="number"
+                          defaultValue={settings.listedBonus.weight_percent}
+                          onChange={(ev) => setSettingsEdits((p) => ({ ...p, lb: ev.target.value }))}
+                        />
+                        <button
+                          className="secondary"
+                          disabled={settingsSavingKey === 'lb'}
+                          onClick={() => saveSettingRow('listed_bonus_config', { id: settings.listedBonus.id }, settingsEdits.lb ?? settings.listedBonus.weight_percent, 'lb')}
+                        >
+                          {settingsSavingKey === 'lb' ? '저장중' : '저장'}
+                        </button>
+                      </div>
+                    )}
+                    {settings.careDomainBonus && (
+                      <div className="settings-row">
+                        <span>돌봄도메인 특례가산</span>
+                        <input
+                          type="number"
+                          defaultValue={settings.careDomainBonus.weight_percent}
+                          onChange={(ev) => setSettingsEdits((p) => ({ ...p, cb: ev.target.value }))}
+                        />
+                        <button
+                          className="secondary"
+                          disabled={settingsSavingKey === 'cb'}
+                          onClick={() => saveSettingRow('care_domain_bonus_config', { id: settings.careDomainBonus.id }, settingsEdits.cb ?? settings.careDomainBonus.weight_percent, 'cb')}
+                        >
+                          {settingsSavingKey === 'cb' ? '저장중' : '저장'}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
           )}
-          {settings && (
+          {configWarning && (
+            <div style={{ background: '#fdecea', border: '1px solid #f5b5ac', color: '#9a2f22', padding: '10px 14px', borderRadius: 6, fontSize: 13, marginBottom: 16 }}>
+              ⚠ {configWarning}
+            </div>
+          )}
+
+          {/* 1. 지원자 정보 + 업로드 */}
+          <div className="card">
+            <h2>1. 지원자 정보</h2>
+            <p className="upload-first-hint">📄 이력서부터 업로드해주세요 — 이름 등 기본정보가 자동으로 채워집니다.</p>
+
+            <div className="tab-group">
+              <button className={tab === 'upload' ? 'active' : ''} onClick={() => setTab('upload')}>이력서 업로드</button>
+              <button className={tab === 'manual' ? 'active' : ''} onClick={() => setTab('manual')}>정형 입력</button>
+            </div>
+            {tab === 'upload' && (
+              <div className="upload-box" onClick={() => fileInputRef.current?.click()}>
+                {uploading ? '추출 중입니다...' : '클릭하여 이력서 PDF/이미지 업로드 (자동 추출)'}
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".pdf,image/*"
+                  style={{ display: 'none' }}
+                  onChange={handleFileUpload}
+                />
+              </div>
+            )}
+
+            <div className="row" style={{ marginTop: 14 }}>
+              <div className="field">
+                <label>지원자 이름</label>
+                <input value={applicantName} onChange={(e) => setApplicantName(e.target.value)} />
+              </div>
+              <div className="field">
+                <label>지원 직무</label>
+                <input value={targetJob} onChange={(e) => setTargetJob(e.target.value)} />
+              </div>
+            </div>
+          </div>
+
+          {/* 2. 경력사항 */}
+          <div className="card">
+            <h2>2. 경력사항</h2>
+            <button type="button" className="criteria-toggle" onClick={() => setShowCriteria((v) => !v)}>
+              {showCriteria ? '판단기준 접기 ▲' : '판단기준 보기 ▼'}
+            </button>
+            {showCriteria && (
+              <div className="criteria-panel">
+                <h4>직무매칭 (동일 / 유사 / 기타)</h4>
+                <ul>
+                  <li><b>동일</b>: 직무분류표상 같은 중분류이거나, 팀장·사업부장이 동일 직무로 판단</li>
+                  <li><b>유사</b>: 같은 대분류이나 중분류 불일치, 또는 팀장·사업부장이 유사 직무로 판단</li>
+                  <li><b>기타</b>: 위 기준에 해당하지 않는 다른 대분류</li>
+                </ul>
+                <h4>업종매칭 (동종 / 유사 / 기타)</h4>
+                <ul>
+                  <li><b>동종</b>: 자사 웹/앱 서비스 제공, 의료기기/용품 유통·도소매, 사회보장서비스 관련</li>
+                  <li><b>유사</b>: 웹/앱 서비스이나 자사 플랫폼 아님, 유통·도소매이나 취급 재화 다름, 대행업(SI/광고대행/3PL/세무회계/콜센터 등)</li>
+                  <li><b>기타</b>: 위 기준에 해당하지 않음</li>
+                </ul>
+                <h4>기업규모 (중소 / 중견 / 대기업)</h4>
+                <ul>
+                  <li>재직 당시 매출액 기준으로 판단 (DART 자동조회 또는 담당자 직접 선택). <b>필수 항목 아님</b> — 미입력 시 해당 가산 없이(0%) 계산됩니다.</li>
+                  <li>매출액 기준은 법적 정확한 기업규모 판정이 아닌 실무 근사치입니다 (중소 1,500억 미만 / 중견 1,500억~1조 / 대기업 1조 이상)</li>
+                  <li>대기업 계열사(자체 매출은 작지만 실질은 대기업 소속)는 아래 "대기업 계열사" 체크 시 매출액과 무관하게 대기업으로 적용됩니다</li>
+                </ul>
+                <h4>돌봄도메인 특례가산 (+{config?.careDomainBonus ?? '-'}%)</h4>
+                <ul>
+                  <li>장기요양·돌봄 관련 기관 경력은 담당자가 "돌봄도메인 특례 대상"을 체크하면, 기업규모 가산과 별개로 고정 가산율이 적용됩니다</li>
+                  <li>담당자 확인 필수 (자동 판별 없음)</li>
+                </ul>
+                <h4>고용형태 계수</h4>
+                <ul>
+                  <li>{config?.employmentType?.length
+                    ? config.employmentType.map((r) => `${r.employment_type} ${r.weight_percent}%`).join(' / ')
+                    : '불러오는 중...'}</li>
+                </ul>
+                <h4>리더십 프리미엄 (+{config?.leadershipPremium ?? '-'}%)</h4>
+                <ul>
+                  <li>재직기간 전체가 아닌, 실제 팀장·파트장 직책을 수행한 기간에만 적용</li>
+                </ul>
+                <h4>상장가산 (+{config?.listedBonus ?? '-'}%)</h4>
+                <ul>
+                  <li>적용 대상: 재무회계 / IR / 감사대응 등 공시·감사·재무보고 업무 관련 직무</li>
+                  <li>"상장가산대상"은 이력서 직무명 기반 시스템 제안이며, "실제업무확인"에 담당자가 체크해야 최종 계산에 반영됨</li>
+                </ul>
+                <h4>경력단절 플래그</h4>
+                <ul>
+                  <li>직전 경력과 90일 이상 공백 시 자동 표시 (계산에는 반영되지 않으며 담당자 판단용 참고 표시)</li>
+                </ul>
+                <h4>반올림(년차 환산) 규칙</h4>
+                <ul>
+                  <li>산출된 경력이 N.50 이하면 N년차, N.50 초과면 N+1년차로 환산</li>
+                </ul>
+              </div>
+            )}
+            <div className="entry-list">
+              {entries.map((e, idx) => {
+                const isExpanded = expandedIds.has(e.id)
+                return (
+                  <div className="entry-card" key={e.id}>
+                    <div className="entry-card-header" onClick={() => toggleExpand(e.id)}>
+                      <div className="entry-card-header-main">
+                        <span className="entry-card-title">{e.company_name || `경력 ${idx + 1} (회사명 미입력)`}</span>
+                        <span className="entry-card-meta">
+                          {e.start_date && e.end_date ? `${e.start_date} ~ ${e.end_date}` : '기간 미입력'}
+                          {e.gap_flag && <span className="flag">경력단절 90일+</span>}
+                        </span>
+                      </div>
+                      <span className="entry-card-toggle">{isExpanded ? '접기 ▲' : '펼치기 ▼'}</span>
+                    </div>
+
+                    {isExpanded && (
+                      <div className="entry-card-body">
+                        <div className="entry-field">
+                          <label>회사명</label>
+                          <input value={e.company_name} onChange={(ev) => updateEntry(e.id, 'company_name', ev.target.value)} />
+                        </div>
+                        <div className="entry-field">
+                          <label>입사일</label>
+                          <input type="date" value={e.start_date} onChange={(ev) => updateEntry(e.id, 'start_date', ev.target.value)} />
+                        </div>
+                        <div className="entry-field">
+                          <label>퇴사일</label>
+                          <input type="date" value={e.end_date} onChange={(ev) => updateEntry(e.id, 'end_date', ev.target.value)} />
+                        </div>
+                        <div className="entry-field">
+                          <label>고용형태</label>
+                          <select value={e.employment_type} onChange={(ev) => updateEntry(e.id, 'employment_type', ev.target.value)}>
+                            {EMPLOYMENT_TYPES.map((v) => <option key={v}>{v}</option>)}
+                          </select>
+                        </div>
+                        <div className="entry-field">
+                          <label>직무매칭</label>
+                          <div className="entry-revenue-row">
+                            <select value={e.job_match} onChange={(ev) => updateEntry(e.id, 'job_match', ev.target.value)} className={!e.job_match ? 'unconfirmed' : ''}>
+                              <option value="">미확인</option>
+                              {MATCH_LEVELS.map((v) => <option key={v}>{v}</option>)}
+                            </select>
+                            <button
+                              type="button"
+                              className="secondary"
+                              onClick={() => suggestJobMatch(e.id)}
+                              disabled={e.job_match_suggesting}
+                            >
+                              {e.job_match_suggesting ? '제안중...' : 'AI 제안'}
+                            </button>
+                          </div>
+                          {e.job_title && <div className="entry-field-hint">이력서상 직무: {e.job_title}</div>}
+                        </div>
+                        <div className="entry-field">
+                          <label>업종매칭</label>
+                          <select value={e.industry_match} onChange={(ev) => updateEntry(e.id, 'industry_match', ev.target.value)} className={!e.industry_match ? 'unconfirmed' : ''}>
+                            <option value="">미확인</option>
+                            <option value="동종">동종</option><option value="유사">유사</option><option value="기타">기타</option>
+                          </select>
+                          {(e.market_hint || e.established_hint) && (
+                            <div className="entry-field-hint">
+                              참고: {e.market_hint || '비상장'}
+                              {e.established_hint && ` · 설립 ${e.established_hint.slice(0, 4)}-${e.established_hint.slice(4, 6)}-${e.established_hint.slice(6, 8)}`}
+                            </div>
+                          )}
+                        </div>
+                        <div className="entry-field">
+                          <label>돌봄도메인 특례</label>
+                          <label className="entry-checkbox-row">
+                            <input type="checkbox" checked={e.care_domain_confirmed} onChange={(ev) => updateEntry(e.id, 'care_domain_confirmed', ev.target.checked)} />
+                            <span>담당자 확인 (특례 대상)</span>
+                          </label>
+                        </div>
+                        <div className="entry-field">
+                          <label>팀장 시작</label>
+                          <input type="date" value={e.leadership_start_date} onChange={(ev) => updateEntry(e.id, 'leadership_start_date', ev.target.value)} />
+                        </div>
+                        <div className="entry-field">
+                          <label>팀장 종료</label>
+                          <input type="date" value={e.leadership_end_date} onChange={(ev) => updateEntry(e.id, 'leadership_end_date', ev.target.value)} />
+                        </div>
+
+                        <div className="entry-field entry-field-full">
+                          <label>기업규모 (매출 기준, 선택)</label>
+                          <div className="entry-revenue-row">
+                            <select
+                              value={e.revenue_bracket}
+                              onChange={(ev) => { updateEntry(e.id, 'revenue_bracket', ev.target.value); updateEntry(e.id, 'revenue_source', 'manual') }}
+                              disabled={e.is_conglomerate_affiliate}
+                            >
+                              <option value="">미입력</option>
+                              {REVENUE_BRACKETS.map((v) => <option key={v}>{v}</option>)}
+                            </select>
+                            <button
+                              type="button"
+                              className="secondary"
+                              onClick={() => lookupRevenue(e.id)}
+                              disabled={e.revenue_lookup_status === 'loading' || e.is_conglomerate_affiliate}
+                            >
+                              {e.revenue_lookup_status === 'loading' ? '조회중...' : 'DART 조회'}
+                            </button>
+                            {e.is_listed_hint !== null && (
+                              <span className="flag" style={{ background: e.is_listed_hint ? '#dcf5e4' : '#eee', color: e.is_listed_hint ? '#16794f' : '#666' }}>
+                                {e.is_listed_hint ? '상장사' : '비상장'}
+                              </span>
+                            )}
+                          </div>
+                          <label className="entry-checkbox-row" style={{ marginTop: 6 }}>
+                            <input
+                              type="checkbox"
+                              checked={e.is_conglomerate_affiliate}
+                              onChange={(ev) => {
+                                updateEntry(e.id, 'is_conglomerate_affiliate', ev.target.checked)
+                                if (ev.target.checked) updateEntry(e.id, 'revenue_source', 'manual')
+                              }}
+                            />
+                            <span>대기업 계열사 (담당자 확인 — 체크 시 매출액과 무관하게 대기업 적용)</span>
+                          </label>
+                          {e.revenue_source === 'auto' && <div className="entry-field-hint">{e.revenue_raw_value}</div>}
+                          {e.revenue_lookup_status === 'failed' && <div className="entry-field-hint entry-field-hint-error">{e.revenue_lookup_message}</div>}
+                          {e.revenue_lookup_status === 'ambiguous' && (
+                            <div style={{ marginTop: 4 }}>
+                              <div className="entry-field-hint entry-field-hint-warn">{e.revenue_lookup_message}</div>
+                              {e.revenue_lookup_candidates.map((c) => (
+                                <button
+                                  key={c.corp_code}
+                                  type="button"
+                                  className="secondary"
+                                  style={{ display: 'block', padding: '4px 8px', fontSize: 12, marginTop: 4, width: '100%' }}
+                                  onClick={() => lookupRevenue(e.id, c.corp_code)}
+                                >
+                                  {c.corp_name} {c.stock_code ? `(${c.stock_code})` : '(비상장)'}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="entry-field">
+                          <label>상장가산대상</label>
+                          <label className="entry-checkbox-row">
+                            <input type="checkbox" checked={e.listed_bonus_eligible_job} onChange={(ev) => updateEntry(e.id, 'listed_bonus_eligible_job', ev.target.checked)} />
+                            <span>시스템 제안 대상</span>
+                          </label>
+                        </div>
+                        <div className="entry-field">
+                          <label>실제업무확인</label>
+                          <label className="entry-checkbox-row">
+                            <input type="checkbox" checked={e.listed_bonus_confirmed} onChange={(ev) => updateEntry(e.id, 'listed_bonus_confirmed', ev.target.checked)} disabled={!e.listed_bonus_eligible_job} />
+                            <span>담당자 최종 확인</span>
+                          </label>
+                        </div>
+
+                        <div className="entry-field-full entry-card-footer">
+                          <button type="button" className="danger" onClick={() => removeEntry(e.id)}>이 경력 삭제</button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+            <div className="btn-row">
+              <button className="secondary" onClick={addEntry}>+ 경력 추가</button>
+            </div>
+            <p style={{ fontSize: 12, color: '#888', marginTop: 10 }}>
+              ※ 직무매칭/업종매칭은 기본값이 없고 "미확인"(노란색 표시) 상태로 시작하며, 담당자가 직접 판단해서 선택해야 계산이 진행됩니다.
+              기업규모(매출 기준)는 필수 항목이 아닙니다 — 미입력 상태로도 계산이 가능하며, 이 경우 기업규모 관련 가산만 0%로 처리됩니다.
+              "DART 조회" 버튼으로 매출액 자동조회가 가능합니다 (상장사·외부감사대상 비상장사만 조회됨, 지원 시점 기준 직전 확정 사업연도 기준). 조회 실패 시 직접 선택하거나 비워두어도 됩니다.
+              동일 이름의 회사가 여러 건이면 후보 목록에서 선택할 수 있습니다.
+              대기업 계열사는 체크 시 매출액 조회와 무관하게 기업규모가 대기업으로 고정 적용됩니다.
+              돌봄도메인 특례는 담당자가 직접 확인 후 체크해야 하며, 체크 시 기업규모 가산과 별개로 고정 가산율이 추가 적용됩니다.
+              상장가산 대상 여부는 이력서 직무명을 기반으로 제안되며, 최종 확정은 담당자가 실제 업무수행을 확인한 뒤 체크해야 합니다.
+              직무매칭은 이력서에서 추출된 직무명과 상단 "지원 직무"를 "AI 제안" 버튼을 누른 시점에 비교해서 제안합니다 (지원 직무를 수정한 뒤 다시 눌러도 재비교됩니다). 이력서 업로드 없이 직접 추가한 경력은 비교할 원문이 없어 AI 제안을 쓸 수 없으니 직접 선택해주세요. 최종 판단은 담당자가 확인 후 수정해주세요.
+            </p>
+          </div>
+
+          {/* 3. 계산 결과 */}
+          <div className="card">
+            <h2>3. 계산 결과</h2>
+            <div className="btn-row" style={{ marginTop: 0, marginBottom: 14 }}>
+              <button onClick={runCalculation} disabled={!config}>계산하기</button>
+              {result && <button className="secondary" onClick={exportPdf}>PDF 내보내기</button>}
+              {result && <button className="secondary" onClick={saveResult} disabled={saving}>{saving ? '저장 중...' : '저장'}</button>}
+            </div>
+            {saveMsg && <p style={{ fontSize: 13, color: saveMsg.includes('실패') ? '#d0342c' : '#16794f' }}>{saveMsg}</p>}
+            {result && result.perEntry.some((e) => !e.revenue_bracket && !e.is_conglomerate_affiliate) && (
+              <p style={{ fontSize: 13, color: '#9a6b16', background: '#fff8e6', border: '1px solid #f0dca0', borderRadius: 6, padding: '8px 12px', marginBottom: 10 }}>
+                ⚠ 일부 경력이 기업규모 미입력 상태로 계산되었습니다 (해당 경력의 기업규모 가산 0% 반영).
+              </p>
+            )}
+
+            {result && (
+              <div ref={resultRef}>
+                <div className="result-summary">{result.roundedYears}년차 (인정경력 {result.totalYears.toFixed(2)}년)</div>
+                <table style={{ marginTop: 14 }}>
+                  <thead>
+                    <tr><th>회사명</th><th>기간</th><th>인정연수</th><th>비고</th></tr>
+                  </thead>
+                  <tbody>
+                    {result.perEntry.map((e) => (
+                      <tr key={e.id}>
+                        <td>{e.company_name}</td>
+                        <td>{e.start_date} ~ {e.end_date}</td>
+                        <td>{e.calc.entryYears.toFixed(2)}년</td>
+                        <td>{e.gap_flag && <span className="flag">경력단절 90일+</span>}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </>
+      )}
+
+      {mainTab === 'history' && (
+        <div className="card">
+          <h2>최근 산출 이력</h2>
+          {history.length === 0 && <p style={{ color: '#888', fontSize: 13 }}>저장된 이력이 없습니다.</p>}
+          {history.length > 0 && (
             <>
-              <h4 style={{ fontSize: 13, marginBottom: 6 }}>직무 × 업종 매칭율 (%)</h4>
-              <div className="settings-grid">
-                {settings.jobIndustry.map((row) => {
-                  const key = `ji-${row.job_match}-${row.industry_match}`
-                  return (
-                    <div className="settings-row" key={key}>
-                      <span>{row.job_match} / {row.industry_match}</span>
-                      <input
-                        type="number"
-                        defaultValue={row.weight_percent}
-                        onChange={(ev) => setSettingsEdits((p) => ({ ...p, [key]: ev.target.value }))}
-                      />
-                      <button
-                        className="secondary"
-                        disabled={settingsSavingKey === key}
-                        onClick={() => saveSettingRow('job_industry_matrix', { job_match: row.job_match, industry_match: row.industry_match }, settingsEdits[key] ?? row.weight_percent, key)}
-                      >
-                        {settingsSavingKey === key ? '저장중' : '저장'}
-                      </button>
-                    </div>
-                  )
-                })}
+              <div className="btn-row" style={{ marginTop: 0, marginBottom: 10 }}>
+                <button
+                  className="danger"
+                  disabled={selectedHistoryIds.size === 0 || historyDeleting}
+                  onClick={deleteSelectedHistory}
+                >
+                  {historyDeleting ? '삭제 중...' : `선택 삭제 (${selectedHistoryIds.size})`}
+                </button>
               </div>
-
-              <h4 style={{ fontSize: 13, margin: '16px 0 6px' }}>직무 × 매출구간 매칭율 (%)</h4>
-              <div className="settings-grid">
-                {settings.jobRevenue.map((row) => {
-                  const key = `jr-${row.job_match}-${row.revenue_bracket}`
-                  return (
-                    <div className="settings-row" key={key}>
-                      <span>{row.job_match} / {row.revenue_bracket}</span>
-                      <input
-                        type="number"
-                        defaultValue={row.weight_percent}
-                        onChange={(ev) => setSettingsEdits((p) => ({ ...p, [key]: ev.target.value }))}
-                      />
-                      <button
-                        className="secondary"
-                        disabled={settingsSavingKey === key}
-                        onClick={() => saveSettingRow('job_revenue_matrix', { job_match: row.job_match, revenue_bracket: row.revenue_bracket }, settingsEdits[key] ?? row.weight_percent, key)}
-                      >
-                        {settingsSavingKey === key ? '저장중' : '저장'}
-                      </button>
-                    </div>
-                  )
-                })}
-              </div>
-
-              <h4 style={{ fontSize: 13, margin: '16px 0 6px' }}>고용형태 계수 (%)</h4>
-              <div className="settings-grid">
-                {settings.employmentType.map((row) => {
-                  const key = `et-${row.employment_type}`
-                  return (
-                    <div className="settings-row" key={key}>
-                      <span>{row.employment_type}</span>
-                      <input
-                        type="number"
-                        defaultValue={row.weight_percent}
-                        onChange={(ev) => setSettingsEdits((p) => ({ ...p, [key]: ev.target.value }))}
-                      />
-                      <button
-                        className="secondary"
-                        disabled={settingsSavingKey === key}
-                        onClick={() => saveSettingRow('employment_type_weights', { employment_type: row.employment_type }, settingsEdits[key] ?? row.weight_percent, key)}
-                      >
-                        {settingsSavingKey === key ? '저장중' : '저장'}
-                      </button>
-                    </div>
-                  )
-                })}
-              </div>
-
-              <h4 style={{ fontSize: 13, margin: '16px 0 6px' }}>리더십 프리미엄 / 상장가산 (%)</h4>
-              <div className="settings-grid">
-                {settings.leadershipPremium && (
-                  <div className="settings-row">
-                    <span>리더십 프리미엄</span>
-                    <input
-                      type="number"
-                      defaultValue={settings.leadershipPremium.weight_percent}
-                      onChange={(ev) => setSettingsEdits((p) => ({ ...p, lp: ev.target.value }))}
-                    />
-                    <button
-                      className="secondary"
-                      disabled={settingsSavingKey === 'lp'}
-                      onClick={() => saveSettingRow('leadership_premium_config', { id: settings.leadershipPremium.id }, settingsEdits.lp ?? settings.leadershipPremium.weight_percent, 'lp')}
-                    >
-                      {settingsSavingKey === 'lp' ? '저장중' : '저장'}
-                    </button>
-                  </div>
-                )}
-                {settings.listedBonus && (
-                  <div className="settings-row">
-                    <span>상장가산</span>
-                    <input
-                      type="number"
-                      defaultValue={settings.listedBonus.weight_percent}
-                      onChange={(ev) => setSettingsEdits((p) => ({ ...p, lb: ev.target.value }))}
-                    />
-                    <button
-                      className="secondary"
-                      disabled={settingsSavingKey === 'lb'}
-                      onClick={() => saveSettingRow('listed_bonus_config', { id: settings.listedBonus.id }, settingsEdits.lb ?? settings.listedBonus.weight_percent, 'lb')}
-                    >
-                      {settingsSavingKey === 'lb' ? '저장중' : '저장'}
-                    </button>
-                  </div>
-                )}
+              <div style={{ overflowX: 'auto' }}>
+                <table>
+                  <thead>
+                    <tr>
+                      <th style={{ width: 30 }}>
+                        <input
+                          type="checkbox"
+                          checked={selectedHistoryIds.size === history.length}
+                          onChange={(ev) => setSelectedHistoryIds(ev.target.checked ? new Set(history.map((h) => h.id)) : new Set())}
+                        />
+                      </th>
+                      <th>이름</th><th>직무군</th><th>인정경력</th><th>날짜</th><th style={{ width: 60 }}></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {history.map((h) => {
+                      const isExpanded = expandedHistoryIds.has(h.id)
+                      const snapshot = h.calc_snapshot
+                      return (
+                        <React.Fragment key={h.id}>
+                          <tr>
+                            <td>
+                              <input
+                                type="checkbox"
+                                checked={selectedHistoryIds.has(h.id)}
+                                onChange={() => toggleHistorySelect(h.id)}
+                              />
+                            </td>
+                            <td>{h.applicants?.name || '(이름없음)'}</td>
+                            <td>{h.applicants?.target_job || '-'}</td>
+                            <td>{h.rounded_years}년차 ({Number(h.total_recognized_years).toFixed(2)}년)</td>
+                            <td>{new Date(h.calculated_at).toLocaleDateString('ko-KR')}</td>
+                            <td>
+                              <button
+                                type="button"
+                                className="secondary"
+                                style={{ padding: '4px 10px', fontSize: 12 }}
+                                onClick={() => toggleHistoryExpand(h.id)}
+                                disabled={!snapshot}
+                              >
+                                {isExpanded ? '접기' : '상세'}
+                              </button>
+                            </td>
+                          </tr>
+                          {isExpanded && snapshot && (
+                            <tr>
+                              <td colSpan={6} style={{ background: '#fafafa', padding: 14 }}>
+                                {(snapshot.perEntry || []).map((entry) => (
+                                  <HistoryEntryDetail key={entry.id} entry={entry} />
+                                ))}
+                              </td>
+                            </tr>
+                          )}
+                        </React.Fragment>
+                      )
+                    })}
+                  </tbody>
+                </table>
               </div>
             </>
           )}
         </div>
       )}
-      {configWarning && (
-        <div style={{ background: '#fdecea', border: '1px solid #f5b5ac', color: '#9a2f22', padding: '10px 14px', borderRadius: 6, fontSize: 13, marginBottom: 16 }}>
-          ⚠ {configWarning}
-        </div>
-      )}
-
-      {/* 1. 지원자 정보 + 업로드 */}
-      <div className="card">
-        <h2>1. 지원자 정보</h2>
-        <p className="upload-first-hint">📄 이력서부터 업로드해주세요 — 이름 등 기본정보가 자동으로 채워집니다.</p>
-
-        <div className="tab-group">
-          <button className={tab === 'upload' ? 'active' : ''} onClick={() => setTab('upload')}>이력서 업로드</button>
-          <button className={tab === 'manual' ? 'active' : ''} onClick={() => setTab('manual')}>정형 입력</button>
-        </div>
-        {tab === 'upload' && (
-          <div className="upload-box" onClick={() => fileInputRef.current?.click()}>
-            {uploading ? '추출 중입니다...' : '클릭하여 이력서 PDF/이미지 업로드 (자동 추출)'}
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".pdf,image/*"
-              style={{ display: 'none' }}
-              onChange={handleFileUpload}
-            />
-          </div>
-        )}
-
-        <div className="row" style={{ marginTop: 14 }}>
-          <div className="field">
-            <label>지원자 이름</label>
-            <input value={applicantName} onChange={(e) => setApplicantName(e.target.value)} />
-          </div>
-          <div className="field">
-            <label>지원 직무</label>
-            <input value={targetJob} onChange={(e) => setTargetJob(e.target.value)} />
-          </div>
-        </div>
-      </div>
-
-      {/* 2. 경력사항 */}
-      <div className="card">
-        <h2>2. 경력사항</h2>
-        <button type="button" className="criteria-toggle" onClick={() => setShowCriteria((v) => !v)}>
-          {showCriteria ? '판단기준 접기 ▲' : '판단기준 보기 ▼'}
-        </button>
-        {showCriteria && (
-          <div className="criteria-panel">
-            <h4>직무매칭 (동일 / 유사 / 기타)</h4>
-            <ul>
-              <li><b>동일</b>: 직무분류표상 같은 중분류이거나, 팀장·사업부장이 동일 직무로 판단</li>
-              <li><b>유사</b>: 같은 대분류이나 중분류 불일치, 또는 팀장·사업부장이 유사 직무로 판단</li>
-              <li><b>기타</b>: 위 기준에 해당하지 않는 다른 대분류</li>
-            </ul>
-            <h4>업종매칭 (동종 / 유사 / 기타)</h4>
-            <ul>
-              <li><b>동종</b>: 자사 웹/앱 서비스 제공, 의료기기/용품 유통·도소매, 사회보장서비스 관련</li>
-              <li><b>유사</b>: 웹/앱 서비스이나 자사 플랫폼 아님, 유통·도소매이나 취급 재화 다름, 대행업(SI/광고대행/3PL/세무회계/콜센터 등)</li>
-              <li><b>기타</b>: 위 기준에 해당하지 않음</li>
-            </ul>
-            <h4>매출구간</h4>
-            <ul>
-              <li>재직 당시 매출액 기준으로 판단 (3000억이상 / 3000억미만 / 당사미만 / +500억 / 50억미만)</li>
-              <li>복지법인/재단 등 비영리기관 경력자는 원칙적으로 낮은 구간 적용</li>
-              <li>단, 장기요양 관련 기관 경력은 "당사미만" 구간 적용 → 아래 돌봄도메인 특례로 자동 반영</li>
-            </ul>
-            <h4>돌봄도메인 (동일 / 유사 / 기타)</h4>
-            <ul>
-              <li><b>동일</b> 선택 시, 매출구간이 자동으로 "당사미만"으로 완화 적용됩니다 (장기요양기관 특례)</li>
-              <li>유사/기타는 현재 특별 처리 없음 (필드만 기록, 추후 데이터 축적 후 차등 검토 예정)</li>
-            </ul>
-            <h4>고용형태 계수</h4>
-            <ul>
-              <li>{config?.employmentType?.length
-                ? config.employmentType.map((r) => `${r.employment_type} ${r.weight_percent}%`).join(' / ')
-                : '불러오는 중...'}</li>
-            </ul>
-            <h4>리더십 프리미엄 (+{config?.leadershipPremium ?? '-'}%)</h4>
-            <ul>
-              <li>재직기간 전체가 아닌, 실제 팀장·파트장 직책을 수행한 기간에만 적용</li>
-            </ul>
-            <h4>상장가산 (+{config?.listedBonus ?? '-'}%)</h4>
-            <ul>
-              <li>적용 대상: 재무회계 / IR / 감사대응 등 공시·감사·재무보고 업무 관련 직무</li>
-              <li>"상장가산대상"은 이력서 직무명 기반 시스템 제안이며, "실제업무확인"에 담당자가 체크해야 최종 계산에 반영됨</li>
-            </ul>
-            <h4>경력단절 플래그</h4>
-            <ul>
-              <li>직전 경력과 90일 이상 공백 시 자동 표시 (계산에는 반영되지 않으며 담당자 판단용 참고 표시)</li>
-            </ul>
-            <h4>반올림(년차 환산) 규칙</h4>
-            <ul>
-              <li>산출된 경력이 N.50 이하면 N년차, N.50 초과면 N+1년차로 환산</li>
-            </ul>
-          </div>
-        )}
-        <div className="entry-list">
-          {entries.map((e, idx) => {
-            const isExpanded = expandedIds.has(e.id)
-            return (
-              <div className="entry-card" key={e.id}>
-                <div className="entry-card-header" onClick={() => toggleExpand(e.id)}>
-                  <div className="entry-card-header-main">
-                    <span className="entry-card-title">{e.company_name || `경력 ${idx + 1} (회사명 미입력)`}</span>
-                    <span className="entry-card-meta">
-                      {e.start_date && e.end_date ? `${e.start_date} ~ ${e.end_date}` : '기간 미입력'}
-                      {e.gap_flag && <span className="flag">경력단절 90일+</span>}
-                    </span>
-                  </div>
-                  <span className="entry-card-toggle">{isExpanded ? '접기 ▲' : '펼치기 ▼'}</span>
-                </div>
-
-                {isExpanded && (
-                  <div className="entry-card-body">
-                    <div className="entry-field">
-                      <label>회사명</label>
-                      <input value={e.company_name} onChange={(ev) => updateEntry(e.id, 'company_name', ev.target.value)} />
-                    </div>
-                    <div className="entry-field">
-                      <label>입사일</label>
-                      <input type="date" value={e.start_date} onChange={(ev) => updateEntry(e.id, 'start_date', ev.target.value)} />
-                    </div>
-                    <div className="entry-field">
-                      <label>퇴사일</label>
-                      <input type="date" value={e.end_date} onChange={(ev) => updateEntry(e.id, 'end_date', ev.target.value)} />
-                    </div>
-                    <div className="entry-field">
-                      <label>고용형태</label>
-                      <select value={e.employment_type} onChange={(ev) => updateEntry(e.id, 'employment_type', ev.target.value)}>
-                        {EMPLOYMENT_TYPES.map((v) => <option key={v}>{v}</option>)}
-                      </select>
-                    </div>
-                    <div className="entry-field">
-                      <label>직무매칭</label>
-                      <div className="entry-revenue-row">
-                        <select value={e.job_match} onChange={(ev) => updateEntry(e.id, 'job_match', ev.target.value)} className={!e.job_match ? 'unconfirmed' : ''}>
-                          <option value="">미확인</option>
-                          {MATCH_LEVELS.map((v) => <option key={v}>{v}</option>)}
-                        </select>
-                        <button
-                          type="button"
-                          className="secondary"
-                          onClick={() => suggestJobMatch(e.id)}
-                          disabled={e.job_match_suggesting}
-                        >
-                          {e.job_match_suggesting ? '제안중...' : 'AI 제안'}
-                        </button>
-                      </div>
-                      {e.job_title && <div className="entry-field-hint">이력서상 직무: {e.job_title}</div>}
-                    </div>
-                    <div className="entry-field">
-                      <label>업종매칭</label>
-                      <select value={e.industry_match} onChange={(ev) => updateEntry(e.id, 'industry_match', ev.target.value)} className={!e.industry_match ? 'unconfirmed' : ''}>
-                        <option value="">미확인</option>
-                        <option value="동종">동종</option><option value="유사">유사</option><option value="기타">기타</option>
-                      </select>
-                      {(e.market_hint || e.established_hint) && (
-                        <div className="entry-field-hint">
-                          참고: {e.market_hint || '비상장'}
-                          {e.established_hint && ` · 설립 ${e.established_hint.slice(0, 4)}-${e.established_hint.slice(4, 6)}-${e.established_hint.slice(6, 8)}`}
-                        </div>
-                      )}
-                    </div>
-                    <div className="entry-field">
-                      <label>돌봄도메인</label>
-                      <select value={e.care_domain_match} onChange={(ev) => updateEntry(e.id, 'care_domain_match', ev.target.value)} className={!e.care_domain_match ? 'unconfirmed' : ''}>
-                        <option value="">미확인</option>
-                        {MATCH_LEVELS.map((v) => <option key={v}>{v}</option>)}
-                      </select>
-                    </div>
-                    <div className="entry-field">
-                      <label>팀장 시작</label>
-                      <input type="date" value={e.leadership_start_date} onChange={(ev) => updateEntry(e.id, 'leadership_start_date', ev.target.value)} />
-                    </div>
-                    <div className="entry-field">
-                      <label>팀장 종료</label>
-                      <input type="date" value={e.leadership_end_date} onChange={(ev) => updateEntry(e.id, 'leadership_end_date', ev.target.value)} />
-                    </div>
-
-                    <div className="entry-field entry-field-full">
-                      <label>매출구간</label>
-                      <div className="entry-revenue-row">
-                        <select value={e.revenue_bracket} onChange={(ev) => { updateEntry(e.id, 'revenue_bracket', ev.target.value); updateEntry(e.id, 'revenue_source', 'manual') }} className={!e.revenue_bracket ? 'unconfirmed' : ''}>
-                          <option value="">미확인</option>
-                          {REVENUE_BRACKETS.map((v) => <option key={v}>{v}</option>)}
-                        </select>
-                        <button
-                          type="button"
-                          className="secondary"
-                          onClick={() => lookupRevenue(e.id)}
-                          disabled={e.revenue_lookup_status === 'loading'}
-                        >
-                          {e.revenue_lookup_status === 'loading' ? '조회중...' : 'DART 조회'}
-                        </button>
-                        {e.is_listed_hint !== null && (
-                          <span className="flag" style={{ background: e.is_listed_hint ? '#dcf5e4' : '#eee', color: e.is_listed_hint ? '#16794f' : '#666' }}>
-                            {e.is_listed_hint ? '상장사' : '비상장'}
-                          </span>
-                        )}
-                      </div>
-                      {e.revenue_source === 'auto' && <div className="entry-field-hint">{e.revenue_raw_value}</div>}
-                      {e.revenue_lookup_status === 'failed' && <div className="entry-field-hint entry-field-hint-error">{e.revenue_lookup_message}</div>}
-                      {e.revenue_lookup_status === 'ambiguous' && (
-                        <div style={{ marginTop: 4 }}>
-                          <div className="entry-field-hint entry-field-hint-warn">{e.revenue_lookup_message}</div>
-                          {e.revenue_lookup_candidates.map((c) => (
-                            <button
-                              key={c.corp_code}
-                              type="button"
-                              className="secondary"
-                              style={{ display: 'block', padding: '4px 8px', fontSize: 12, marginTop: 4, width: '100%' }}
-                              onClick={() => lookupRevenue(e.id, c.corp_code)}
-                            >
-                              {c.corp_name} {c.stock_code ? `(${c.stock_code})` : '(비상장)'}
-                            </button>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-
-                    <div className="entry-field">
-                      <label>상장가산대상</label>
-                      <label className="entry-checkbox-row">
-                        <input type="checkbox" checked={e.listed_bonus_eligible_job} onChange={(ev) => updateEntry(e.id, 'listed_bonus_eligible_job', ev.target.checked)} />
-                        <span>시스템 제안 대상</span>
-                      </label>
-                    </div>
-                    <div className="entry-field">
-                      <label>실제업무확인</label>
-                      <label className="entry-checkbox-row">
-                        <input type="checkbox" checked={e.listed_bonus_confirmed} onChange={(ev) => updateEntry(e.id, 'listed_bonus_confirmed', ev.target.checked)} disabled={!e.listed_bonus_eligible_job} />
-                        <span>담당자 최종 확인</span>
-                      </label>
-                    </div>
-
-                    <div className="entry-field-full entry-card-footer">
-                      <button type="button" className="danger" onClick={() => removeEntry(e.id)}>이 경력 삭제</button>
-                    </div>
-                  </div>
-                )}
-              </div>
-            )
-          })}
-        </div>
-        <div className="btn-row">
-          <button className="secondary" onClick={addEntry}>+ 경력 추가</button>
-        </div>
-        <p style={{ fontSize: 12, color: '#888', marginTop: 10 }}>
-          ※ 직무매칭/업종매칭/매출구간/돌봄도메인은 기본값이 없고 "미확인"(노란색 표시) 상태로 시작합니다. 담당자가 직접 판단해서 선택해야 하며, 미확인 항목이 남아있으면 계산이 진행되지 않습니다.
-          "DART 조회" 버튼으로 매출액 자동조회가 가능합니다 (상장사·외부감사대상 비상장사만 조회됨. 조회 실패 시 직접 선택해주세요).
-          동일 이름의 회사가 여러 건이면 후보 목록에서 선택할 수 있습니다.
-          복지법인/장기요양기관 특례는 돌봄도메인을 "동일"로 선택하면 자동 반영됩니다.
-          상장가산 대상 여부는 이력서 직무명을 기반으로 제안되며, 최종 확정은 담당자가 실제 업무수행을 확인한 뒤 체크해야 합니다.
-          직무매칭은 이력서에서 추출된 직무명과 상단 "지원 직무"를 "AI 제안" 버튼을 누른 시점에 비교해서 제안합니다 (지원 직무를 수정한 뒤 다시 눌러도 재비교됩니다). 이력서 업로드 없이 직접 추가한 경력은 비교할 원문이 없어 AI 제안을 쓸 수 없으니 직접 선택해주세요. 최종 판단은 담당자가 확인 후 수정해주세요.
-        </p>
-      </div>
-
-      {/* 3. 계산 결과 */}
-      <div className="card">
-        <h2>3. 계산 결과</h2>
-        <div className="btn-row" style={{ marginTop: 0, marginBottom: 14 }}>
-          <button onClick={runCalculation} disabled={!config}>계산하기</button>
-          {result && <button className="secondary" onClick={exportPdf}>PDF 내보내기</button>}
-          {result && <button className="secondary" onClick={saveResult} disabled={saving}>{saving ? '저장 중...' : '저장'}</button>}
-        </div>
-        {saveMsg && <p style={{ fontSize: 13, color: saveMsg.includes('실패') ? '#d0342c' : '#16794f' }}>{saveMsg}</p>}
-
-        {result && (
-          <div ref={resultRef}>
-            <div className="result-summary">{result.roundedYears}년차 (인정경력 {result.totalYears.toFixed(2)}년)</div>
-            <table style={{ marginTop: 14 }}>
-              <thead>
-                <tr><th>회사명</th><th>기간</th><th>인정연수</th><th>비고</th></tr>
-              </thead>
-              <tbody>
-                {result.perEntry.map((e) => (
-                  <tr key={e.id}>
-                    <td>{e.company_name}</td>
-                    <td>{e.start_date} ~ {e.end_date}</td>
-                    <td>{e.calc.entryYears.toFixed(2)}년</td>
-                    <td>{e.gap_flag && <span className="flag">경력단절 90일+</span>}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
-
-      {/* 4. 이력 조회 */}
-      <div className="card">
-        <h2>4. 최근 산출 이력</h2>
-        {history.length === 0 && <p style={{ color: '#888', fontSize: 13 }}>저장된 이력이 없습니다.</p>}
-        {history.length > 0 && (
-          <>
-            <div className="btn-row" style={{ marginTop: 0, marginBottom: 10 }}>
-              <button
-                className="danger"
-                disabled={selectedHistoryIds.size === 0 || historyDeleting}
-                onClick={deleteSelectedHistory}
-              >
-                {historyDeleting ? '삭제 중...' : `선택 삭제 (${selectedHistoryIds.size})`}
-              </button>
-            </div>
-            <div style={{ overflowX: 'auto' }}>
-              <table>
-                <thead>
-                  <tr>
-                    <th style={{ width: 30 }}>
-                      <input
-                        type="checkbox"
-                        checked={selectedHistoryIds.size === history.length}
-                        onChange={(ev) => setSelectedHistoryIds(ev.target.checked ? new Set(history.map((h) => h.id)) : new Set())}
-                      />
-                    </th>
-                    <th>이름</th><th>직무군</th><th>인정경력</th><th>날짜</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {history.map((h) => (
-                    <tr key={h.id}>
-                      <td>
-                        <input
-                          type="checkbox"
-                          checked={selectedHistoryIds.has(h.id)}
-                          onChange={() => toggleHistorySelect(h.id)}
-                        />
-                      </td>
-                      <td>{h.applicants?.name || '(이름없음)'}</td>
-                      <td>{h.applicants?.target_job || '-'}</td>
-                      <td>{h.rounded_years}년차 ({Number(h.total_recognized_years).toFixed(2)}년)</td>
-                      <td>{new Date(h.calculated_at).toLocaleDateString('ko-KR')}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </>
-        )}
-      </div>
     </div>
   )
 }

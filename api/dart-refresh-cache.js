@@ -5,30 +5,60 @@
 // 브라우저로 이 주소를 그냥 열면, 자동으로 이어서 호출하며 진행 상황을 보여주는 화면이 뜬다.
 
 import JSZip from 'jszip'
-import { XMLParser } from 'fast-xml-parser'
 import { createClient } from '@supabase/supabase-js'
 
-async function fetchAllRows(apiKey) {
+function decodeXmlEntities(text) {
+  return text
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&')
+}
+
+// fast-xml-parser로 트리 전체를 재구성하면 10만 건 이상에서 느려서(시간초과 원인으로 추정)
+// 필요한 3개 필드만 정규식으로 직접 추출하는 훨씬 가벼운 방식으로 변경
+function extractCorpListFast(xmlText) {
+  const corpCodes = [...xmlText.matchAll(/<corp_code>([^<]*)<\/corp_code>/g)].map((m) => m[1])
+  const corpNames = [...xmlText.matchAll(/<corp_name>([^<]*)<\/corp_name>/g)].map((m) => decodeXmlEntities(m[1]))
+  const stockCodes = [...xmlText.matchAll(/<stock_code>([^<]*)<\/stock_code>/g)].map((m) => m[1].trim())
+
+  const result = []
+  for (let i = 0; i < corpCodes.length; i++) {
+    result.push({ corp_code: corpCodes[i], corp_name: corpNames[i], stock_code: stockCodes[i] || null })
+  }
+  return result
+}
+
+async function fetchAllRows(apiKey, timing) {
+  const t0 = Date.now()
   const dartRes = await fetch(`https://opendart.fss.or.kr/api/corpCode.xml?crtfc_key=${apiKey}`)
   if (!dartRes.ok) throw new Error('DART corpCode 다운로드 실패')
   const buf = await dartRes.arrayBuffer()
+  timing.download = Date.now() - t0
+
+  const t1 = Date.now()
   const zip = await JSZip.loadAsync(buf)
   const xmlFile = zip.file('CORPCODE.xml')
   if (!xmlFile) throw new Error('corpCode.xml을 zip에서 찾을 수 없습니다')
   const xmlText = await xmlFile.async('text')
-  const parser = new XMLParser({ parseTagValue: false })
-  const parsed = parser.parse(xmlText)
-  const list = parsed?.result?.list || []
-  const corpList = Array.isArray(list) ? list : [list]
+  timing.unzip = Date.now() - t1
 
-  return corpList
+  const t2 = Date.now()
+  const rawList = extractCorpListFast(xmlText)
+  timing.parse = Date.now() - t2
+
+  const t3 = Date.now()
+  const rows = rawList
     .filter((c) => c.corp_code && c.corp_name)
     .map((c) => ({
       corp_code: c.corp_code,
       corp_name: c.corp_name,
-      stock_code: c.stock_code ? String(c.stock_code).trim() || null : null,
+      stock_code: c.stock_code || null,
       updated_at: new Date().toISOString(),
     }))
+  timing.map = Date.now() - t3
+  return rows
 }
 
 export default async function handler(req, res) {
@@ -58,14 +88,23 @@ const logEl = document.getElementById('log');
 function log(msg) { logEl.textContent += '\\n' + msg; }
 async function step(offset) {
   log('처리 중... (offset=' + offset + ')');
-  const res = await fetch('/api/dart-refresh-cache?format=json&offset=' + offset + '&limit=15000');
-  const data = await res.json();
-  if (data.error) { log('오류 발생: ' + data.error); return; }
-  log('완료: ' + data.inserted + '건 저장 (전체 ' + data.total + '건 중 ' + (offset + data.inserted) + '건 진행)');
-  if (data.done) {
-    log('\\n✅ 전체 완료되었습니다! 이 창을 닫으셔도 됩니다.');
-  } else {
-    step(data.nextOffset);
+  try {
+    const res = await fetch('/api/dart-refresh-cache?format=json&offset=' + offset + '&limit=15000');
+    if (!res.ok) {
+      const text = await res.text();
+      log('❌ 서버 오류 (HTTP ' + res.status + '): ' + text.slice(0, 300));
+      return;
+    }
+    const data = await res.json();
+    if (data.error) { log('❌ 오류 발생: ' + data.error); return; }
+    log('완료: ' + data.inserted + '건 저장 (전체 ' + data.total + '건 중 ' + (offset + data.inserted) + '건 진행, 처리시간 ' + JSON.stringify(data.timing_ms) + ')');
+    if (data.done) {
+      log('\\n✅ 전체 완료되었습니다! 이 창을 닫으셔도 됩니다.');
+    } else {
+      step(data.nextOffset);
+    }
+  } catch (err) {
+    log('❌ 요청 실패(네트워크 또는 시간초과): ' + err.message);
   }
 }
 step(0);
@@ -74,7 +113,8 @@ step(0);
   }
 
   try {
-    const rows = await fetchAllRows(apiKey)
+    const timing = {}
+    const rows = await fetchAllRows(apiKey, timing)
     const slice = rows.slice(offset, offset + limit)
 
     const supabase = createClient(supabaseUrl, supabaseKey)
@@ -83,6 +123,7 @@ step(0);
     const chunks = []
     for (let i = 0; i < slice.length; i += CHUNK) chunks.push(slice.slice(i, i + CHUNK))
 
+    const tUpload = Date.now()
     for (let i = 0; i < chunks.length; i += PARALLEL) {
       const batch = chunks.slice(i, i + PARALLEL)
       const results = await Promise.all(
@@ -91,6 +132,7 @@ step(0);
       const err = results.find((r) => r.error)
       if (err) throw new Error('저장 중 오류: ' + err.error.message)
     }
+    timing.upload = Date.now() - tUpload
 
     const nextOffset = offset + limit
     const done = nextOffset >= rows.length
@@ -100,6 +142,7 @@ step(0);
       inserted: slice.length,
       nextOffset: done ? null : nextOffset,
       done,
+      timing_ms: timing,
     })
   } catch (err) {
     return res.status(500).json({ error: '캐시 갱신 중 오류: ' + err.message })

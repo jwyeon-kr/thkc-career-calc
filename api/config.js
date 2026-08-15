@@ -18,30 +18,6 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: 'SUPABASE_URL 또는 SUPABASE_ANON_KEY 환경변수가 설정되지 않았습니다.' })
     }
 
-    // 진단: supabase-js 라이브러리를 거치지 않고 순수 네트워크 연결 자체를 먼저 테스트
-    try {
-      const rawTest = await fetch(supabaseUrl + '/rest/v1/', {
-        headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}` },
-      })
-      if (!rawTest.ok && rawTest.status !== 404) {
-        const bodyText = await rawTest.text().catch(() => '')
-        return res.status(500).json({
-          error: `Supabase 서버 자체 접속은 되었으나 응답 상태 이상: HTTP ${rawTest.status}`,
-          cause: bodyText.slice(0, 300),
-          url_used: supabaseUrl,
-          key_length: supabaseKey.length,
-          key_prefix: supabaseKey.slice(0, 12),
-        })
-      }
-    } catch (rawErr) {
-      return res.status(500).json({
-        error: 'Vercel 서버에서 Supabase로 순수 네트워크 연결 자체가 실패했습니다: ' + rawErr.message,
-        cause: rawErr.cause ? String(rawErr.cause) : null,
-        cause_code: rawErr.cause?.code || null,
-        url_used: supabaseUrl,
-      })
-    }
-
     const supabase = createClient(supabaseUrl, supabaseKey)
 
     const [ji, jr, et, lp, lb] = await Promise.all([

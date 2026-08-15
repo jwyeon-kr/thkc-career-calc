@@ -241,7 +241,7 @@ export default function App() {
   return (
     <div className="container">
       <h1>경력산출 자동화 시스템</h1>
-      <div className="subtitle">인사기획팀 내부 전용 · v2026-08-15-06 (인증 진단 강화)</div>
+      <div className="subtitle">인사기획팀 내부 전용 · v2026-08-15-07</div>
       {configWarning && (
         <div style={{ background: '#fdecea', border: '1px solid #f5b5ac', color: '#9a2f22', padding: '10px 14px', borderRadius: 6, fontSize: 13, marginBottom: 16 }}>
           ⚠ {configWarning}

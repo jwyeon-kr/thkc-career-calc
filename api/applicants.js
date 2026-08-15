@@ -2,6 +2,11 @@
 // 지원자/경력사항/산출결과 저장 및 최근 이력 조회를 서버에서 처리한다.
 // 브라우저가 Supabase에 직접 접속하지 않도록 하여 연결 문제를 회피하고,
 // RLS 미적용 테이블에 대한 브라우저 직접 접근을 없애 보안도 함께 개선한다.
+//
+// [2026-08-15 수정] 두 가지 반영:
+// 1) 버그 수정: career_entries 저장 시 폐기된 필드(care_domain_match)를 여전히 참조하고 있어
+//    항상 undefined가 저장되고, 신규 필드(is_conglomerate_affiliate)는 저장에서 누락되어 있던 문제 수정.
+// 2) 이력 관리 탭에서 경력사항 세부내역을 볼 수 있도록, GET 응답에 calc_snapshot(계산 스냅샷 전체) 포함.
 
 import { createClient } from '@supabase/supabase-js'
 
@@ -19,7 +24,7 @@ export default async function handler(req, res) {
     try {
       const { data, error } = await supabase
         .from('calculation_results')
-        .select('id, applicant_id, total_recognized_years, rounded_years, calculated_at, applicants(name, target_job)')
+        .select('id, applicant_id, total_recognized_years, rounded_years, calculated_at, calc_snapshot, applicants(name, target_job)')
         .order('calculated_at', { ascending: false })
         .limit(15)
       if (error) return res.status(500).json({ error: error.message })
@@ -80,7 +85,8 @@ export default async function handler(req, res) {
         industry_match: e.industry_match,
         revenue_bracket: e.revenue_bracket,
         revenue_source: e.revenue_source,
-        care_domain_match: e.care_domain_match,
+        is_conglomerate_affiliate: e.is_conglomerate_affiliate,
+        care_domain_confirmed: e.care_domain_confirmed,
         leadership_start_date: e.leadership_start_date || null,
         leadership_end_date: e.leadership_end_date || null,
         listed_bonus_eligible_job: e.listed_bonus_eligible_job,

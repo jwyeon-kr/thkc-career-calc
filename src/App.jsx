@@ -267,7 +267,7 @@ export default function App() {
         end_date: c.end_date || '',
         employment_type: EMPLOYMENT_TYPES.includes(c.employment_type_guess) ? c.employment_type_guess : '정규직',
         job_match: MATCH_LEVELS.includes(c.job_match_suggestion) ? c.job_match_suggestion : '',
-        listed_bonus_eligible_job: suggestListedBonusEligible(c.job_title || ''),
+        job_title: c.job_title || '',listed_bonus_eligible_job: suggestListedBonusEligible(c.job_title || ''),
       }))
       if (extracted.length > 0) {
         setEntries(extracted)

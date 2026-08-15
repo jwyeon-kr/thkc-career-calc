@@ -7,7 +7,7 @@ import jsPDF from 'jspdf'
 
 const EMPLOYMENT_TYPES = ['정규직', '계약직', '파견', '인턴']
 const MATCH_LEVELS = ['동일', '유사', '기타']
-const REVENUE_BRACKETS = ['3000억이상', '3000억미만', '당사미만', '+500억', '50억미만']
+const REVENUE_BRACKETS = ['중소', '중견', '대기업']
 
 function newEntry() {
   return {
@@ -18,10 +18,11 @@ function newEntry() {
     employment_type: '정규직',
     job_match: '',       // '' = 미확인 (담당자가 직접 판단하거나 AI 제안을 받아야 함)
     industry_match: '',  // '' = 미확인
-    revenue_bracket: '', // '' = 미확인
+    revenue_bracket: '', // '' = 미입력 (필수 아님, 비어있으면 매출 가산 0%로 계산)
     revenue_source: 'manual',
     revenue_raw_value: '',
-    care_domain_match: '', // '' = 미확인
+    is_conglomerate_affiliate: false, // 대기업 계열사 담당자 확인 시 체크 -> 매출액과 무관하게 기업규모 '대기업' 고정
+    care_domain_confirmed: false, // 돌봄/장기요양기관 특례 대상 담당자 확인 시 체크 -> 별도 고정 가산율 적용
     leadership_start_date: '',
     leadership_end_date: '',
     listed_bonus_eligible_job: false,
@@ -267,7 +268,8 @@ export default function App() {
         end_date: c.end_date || '',
         employment_type: EMPLOYMENT_TYPES.includes(c.employment_type_guess) ? c.employment_type_guess : '정규직',
         job_match: MATCH_LEVELS.includes(c.job_match_suggestion) ? c.job_match_suggestion : '',
-        job_title: c.job_title || '',listed_bonus_eligible_job: suggestListedBonusEligible(c.job_title || ''),
+        job_title: c.job_title || '',
+        listed_bonus_eligible_job: suggestListedBonusEligible(c.job_title || ''),
       }))
       if (extracted.length > 0) {
         setEntries(extracted)
@@ -352,13 +354,12 @@ export default function App() {
       return
     }
 
-    const unconfirmed = validEntries.filter(
-      (e) => !e.job_match || !e.industry_match || !e.revenue_bracket || !e.care_domain_match
-    )
+    // 매출구간/돌봄도메인은 필수 항목이 아님 (미입력이면 해당 가산 0%로 계산됨)
+    const unconfirmed = validEntries.filter((e) => !e.job_match || !e.industry_match)
     if (unconfirmed.length > 0) {
       const names = unconfirmed.map((e) => e.company_name).join(', ')
       alert(
-        `아래 경력에 "미확인" 상태인 판단항목(직무매칭/업종매칭/매출구간/돌봄도메인)이 있어 계산할 수 없습니다.\n\n대상: ${names}\n\n해당 카드를 펼쳐서 항목을 확인/선택해주세요.`
+        `아래 경력에 "미확인" 상태인 판단항목(직무매칭/업종매칭)이 있어 계산할 수 없습니다.\n\n대상: ${names}\n\n해당 카드를 펼쳐서 항목을 확인/선택해주세요.`
       )
       return
     }
@@ -423,7 +424,7 @@ export default function App() {
   return (
     <div className="container">
       <h1>경력산출 자동화 시스템</h1>
-      <div className="subtitle">인사기획팀 내부 전용 · v2026-08-15-17 (대용량 이력서 업로드 지원)</div>
+      <div className="subtitle">인사기획팀 내부 전용 · v2026-08-15-18 (기업규모 3단계 개편)</div>
       <button type="button" className="criteria-toggle" style={{ marginBottom: 14 }} onClick={toggleSettings}>
         {showSettings ? '설정 관리 접기 ▲' : '⚙ 설정 관리 (판단기준 수치 수정)'}
       </button>
@@ -463,7 +464,7 @@ export default function App() {
                 })}
               </div>
 
-              <h4 style={{ fontSize: 13, margin: '16px 0 6px' }}>직무 × 매출구간 매칭율 (%)</h4>
+              <h4 style={{ fontSize: 13, margin: '16px 0 6px' }}>직무 × 기업규모 매칭율 (%)</h4>
               <div className="settings-grid">
                 {settings.jobRevenue.map((row) => {
                   const key = `jr-${row.job_match}-${row.revenue_bracket}`
@@ -511,7 +512,7 @@ export default function App() {
                 })}
               </div>
 
-              <h4 style={{ fontSize: 13, margin: '16px 0 6px' }}>리더십 프리미엄 / 상장가산 (%)</h4>
+              <h4 style={{ fontSize: 13, margin: '16px 0 6px' }}>리더십 프리미엄 / 상장가산 / 돌봄도메인 특례가산 (%)</h4>
               <div className="settings-grid">
                 {settings.leadershipPremium && (
                   <div className="settings-row">
@@ -544,6 +545,23 @@ export default function App() {
                       onClick={() => saveSettingRow('listed_bonus_config', { id: settings.listedBonus.id }, settingsEdits.lb ?? settings.listedBonus.weight_percent, 'lb')}
                     >
                       {settingsSavingKey === 'lb' ? '저장중' : '저장'}
+                    </button>
+                  </div>
+                )}
+                {settings.careDomainBonus && (
+                  <div className="settings-row">
+                    <span>돌봄도메인 특례가산</span>
+                    <input
+                      type="number"
+                      defaultValue={settings.careDomainBonus.weight_percent}
+                      onChange={(ev) => setSettingsEdits((p) => ({ ...p, cb: ev.target.value }))}
+                    />
+                    <button
+                      className="secondary"
+                      disabled={settingsSavingKey === 'cb'}
+                      onClick={() => saveSettingRow('care_domain_bonus_config', { id: settings.careDomainBonus.id }, settingsEdits.cb ?? settings.careDomainBonus.weight_percent, 'cb')}
+                    >
+                      {settingsSavingKey === 'cb' ? '저장중' : '저장'}
                     </button>
                   </div>
                 )}
@@ -612,16 +630,16 @@ export default function App() {
               <li><b>유사</b>: 웹/앱 서비스이나 자사 플랫폼 아님, 유통·도소매이나 취급 재화 다름, 대행업(SI/광고대행/3PL/세무회계/콜센터 등)</li>
               <li><b>기타</b>: 위 기준에 해당하지 않음</li>
             </ul>
-            <h4>매출구간</h4>
+            <h4>기업규모 (중소 / 중견 / 대기업)</h4>
             <ul>
-              <li>재직 당시 매출액 기준으로 판단 (3000억이상 / 3000억미만 / 당사미만 / +500억 / 50억미만)</li>
-              <li>복지법인/재단 등 비영리기관 경력자는 원칙적으로 낮은 구간 적용</li>
-              <li>단, 장기요양 관련 기관 경력은 "당사미만" 구간 적용 → 아래 돌봄도메인 특례로 자동 반영</li>
+              <li>재직 당시 매출액 기준으로 판단 (DART 자동조회 또는 담당자 직접 선택). <b>필수 항목 아님</b> — 미입력 시 해당 가산 없이(0%) 계산됩니다.</li>
+              <li>매출액 기준은 법적 정확한 기업규모 판정이 아닌 실무 근사치입니다 (중소 1,500억 미만 / 중견 1,500억~1조 / 대기업 1조 이상)</li>
+              <li>대기업 계열사(자체 매출은 작지만 실질은 대기업 소속)는 아래 "대기업 계열사" 체크 시 매출액과 무관하게 대기업으로 적용됩니다</li>
             </ul>
-            <h4>돌봄도메인 (동일 / 유사 / 기타)</h4>
+            <h4>돌봄도메인 특례가산 (+{config?.careDomainBonus ?? '-'}%)</h4>
             <ul>
-              <li><b>동일</b> 선택 시, 매출구간이 자동으로 "당사미만"으로 완화 적용됩니다 (장기요양기관 특례)</li>
-              <li>유사/기타는 현재 특별 처리 없음 (필드만 기록, 추후 데이터 축적 후 차등 검토 예정)</li>
+              <li>장기요양·돌봄 관련 기관 경력은 담당자가 "돌봄도메인 특례 대상"을 체크하면, 기업규모 가산과 별개로 고정 가산율이 적용됩니다</li>
+              <li>담당자 확인 필수 (자동 판별 없음)</li>
             </ul>
             <h4>고용형태 계수</h4>
             <ul>
@@ -716,11 +734,11 @@ export default function App() {
                       )}
                     </div>
                     <div className="entry-field">
-                      <label>돌봄도메인</label>
-                      <select value={e.care_domain_match} onChange={(ev) => updateEntry(e.id, 'care_domain_match', ev.target.value)} className={!e.care_domain_match ? 'unconfirmed' : ''}>
-                        <option value="">미확인</option>
-                        {MATCH_LEVELS.map((v) => <option key={v}>{v}</option>)}
-                      </select>
+                      <label>돌봄도메인 특례</label>
+                      <label className="entry-checkbox-row">
+                        <input type="checkbox" checked={e.care_domain_confirmed} onChange={(ev) => updateEntry(e.id, 'care_domain_confirmed', ev.target.checked)} />
+                        <span>담당자 확인 (특례 대상)</span>
+                      </label>
                     </div>
                     <div className="entry-field">
                       <label>팀장 시작</label>
@@ -732,17 +750,21 @@ export default function App() {
                     </div>
 
                     <div className="entry-field entry-field-full">
-                      <label>매출구간</label>
+                      <label>기업규모 (매출 기준, 선택)</label>
                       <div className="entry-revenue-row">
-                        <select value={e.revenue_bracket} onChange={(ev) => { updateEntry(e.id, 'revenue_bracket', ev.target.value); updateEntry(e.id, 'revenue_source', 'manual') }} className={!e.revenue_bracket ? 'unconfirmed' : ''}>
-                          <option value="">미확인</option>
+                        <select
+                          value={e.revenue_bracket}
+                          onChange={(ev) => { updateEntry(e.id, 'revenue_bracket', ev.target.value); updateEntry(e.id, 'revenue_source', 'manual') }}
+                          disabled={e.is_conglomerate_affiliate}
+                        >
+                          <option value="">미입력</option>
                           {REVENUE_BRACKETS.map((v) => <option key={v}>{v}</option>)}
                         </select>
                         <button
                           type="button"
                           className="secondary"
                           onClick={() => lookupRevenue(e.id)}
-                          disabled={e.revenue_lookup_status === 'loading'}
+                          disabled={e.revenue_lookup_status === 'loading' || e.is_conglomerate_affiliate}
                         >
                           {e.revenue_lookup_status === 'loading' ? '조회중...' : 'DART 조회'}
                         </button>
@@ -752,6 +774,17 @@ export default function App() {
                           </span>
                         )}
                       </div>
+                      <label className="entry-checkbox-row" style={{ marginTop: 6 }}>
+                        <input
+                          type="checkbox"
+                          checked={e.is_conglomerate_affiliate}
+                          onChange={(ev) => {
+                            updateEntry(e.id, 'is_conglomerate_affiliate', ev.target.checked)
+                            if (ev.target.checked) updateEntry(e.id, 'revenue_source', 'manual')
+                          }}
+                        />
+                        <span>대기업 계열사 (담당자 확인 — 체크 시 매출액과 무관하게 대기업 적용)</span>
+                      </label>
                       {e.revenue_source === 'auto' && <div className="entry-field-hint">{e.revenue_raw_value}</div>}
                       {e.revenue_lookup_status === 'failed' && <div className="entry-field-hint entry-field-hint-error">{e.revenue_lookup_message}</div>}
                       {e.revenue_lookup_status === 'ambiguous' && (
@@ -800,10 +833,12 @@ export default function App() {
           <button className="secondary" onClick={addEntry}>+ 경력 추가</button>
         </div>
         <p style={{ fontSize: 12, color: '#888', marginTop: 10 }}>
-          ※ 직무매칭/업종매칭/매출구간/돌봄도메인은 기본값이 없고 "미확인"(노란색 표시) 상태로 시작합니다. 담당자가 직접 판단해서 선택해야 하며, 미확인 항목이 남아있으면 계산이 진행되지 않습니다.
-          "DART 조회" 버튼으로 매출액 자동조회가 가능합니다 (상장사·외부감사대상 비상장사만 조회됨. 조회 실패 시 직접 선택해주세요).
+          ※ 직무매칭/업종매칭은 기본값이 없고 "미확인"(노란색 표시) 상태로 시작하며, 담당자가 직접 판단해서 선택해야 계산이 진행됩니다.
+          기업규모(매출 기준)는 필수 항목이 아닙니다 — 미입력 상태로도 계산이 가능하며, 이 경우 기업규모 관련 가산만 0%로 처리됩니다.
+          "DART 조회" 버튼으로 매출액 자동조회가 가능합니다 (상장사·외부감사대상 비상장사만 조회됨, 지원 시점 기준 직전 확정 사업연도 기준). 조회 실패 시 직접 선택하거나 비워두어도 됩니다.
           동일 이름의 회사가 여러 건이면 후보 목록에서 선택할 수 있습니다.
-          복지법인/장기요양기관 특례는 돌봄도메인을 "동일"로 선택하면 자동 반영됩니다.
+          대기업 계열사는 체크 시 매출액 조회와 무관하게 기업규모가 대기업으로 고정 적용됩니다.
+          돌봄도메인 특례는 담당자가 직접 확인 후 체크해야 하며, 체크 시 기업규모 가산과 별개로 고정 가산율이 추가 적용됩니다.
           상장가산 대상 여부는 이력서 직무명을 기반으로 제안되며, 최종 확정은 담당자가 실제 업무수행을 확인한 뒤 체크해야 합니다.
           직무매칭은 이력서에서 추출된 직무명과 상단 "지원 직무"를 "AI 제안" 버튼을 누른 시점에 비교해서 제안합니다 (지원 직무를 수정한 뒤 다시 눌러도 재비교됩니다). 이력서 업로드 없이 직접 추가한 경력은 비교할 원문이 없어 AI 제안을 쓸 수 없으니 직접 선택해주세요. 최종 판단은 담당자가 확인 후 수정해주세요.
         </p>
@@ -818,6 +853,11 @@ export default function App() {
           {result && <button className="secondary" onClick={saveResult} disabled={saving}>{saving ? '저장 중...' : '저장'}</button>}
         </div>
         {saveMsg && <p style={{ fontSize: 13, color: saveMsg.includes('실패') ? '#d0342c' : '#16794f' }}>{saveMsg}</p>}
+        {result && result.perEntry.some((e) => !e.revenue_bracket && !e.is_conglomerate_affiliate) && (
+          <p style={{ fontSize: 13, color: '#9a6b16', background: '#fff8e6', border: '1px solid #f0dca0', borderRadius: 6, padding: '8px 12px', marginBottom: 10 }}>
+            ⚠ 일부 경력이 기업규모 미입력 상태로 계산되었습니다 (해당 경력의 기업규모 가산 0% 반영).
+          </p>
+        )}
 
         {result && (
           <div ref={resultRef}>

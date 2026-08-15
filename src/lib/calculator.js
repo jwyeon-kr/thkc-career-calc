@@ -4,7 +4,7 @@ export async function loadWeightConfig() {
     const res = await fetch('/api/config')
     const data = await res.json()
     if (data.error) {
-      const detail = [data.error, data.cause, data.url_used ? `(요청 URL: ${data.url_used})` : null]
+      const detail = [data.error, data.cause, data.cause_code ? `[코드: ${data.cause_code}]` : null, data.url_used ? `(요청 URL: ${data.url_used})` : null]
         .filter(Boolean)
         .join(' | ')
       return {

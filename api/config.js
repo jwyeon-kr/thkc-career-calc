@@ -18,6 +18,26 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: 'SUPABASE_URL 또는 SUPABASE_ANON_KEY 환경변수가 설정되지 않았습니다.' })
     }
 
+    // 진단: supabase-js 라이브러리를 거치지 않고 순수 네트워크 연결 자체를 먼저 테스트
+    try {
+      const rawTest = await fetch(supabaseUrl + '/rest/v1/', {
+        headers: { apikey: supabaseKey },
+      })
+      if (!rawTest.ok && rawTest.status !== 404) {
+        return res.status(500).json({
+          error: `Supabase 서버 자체 접속은 되었으나 응답 상태 이상: HTTP ${rawTest.status}`,
+          url_used: supabaseUrl,
+        })
+      }
+    } catch (rawErr) {
+      return res.status(500).json({
+        error: 'Vercel 서버에서 Supabase로 순수 네트워크 연결 자체가 실패했습니다: ' + rawErr.message,
+        cause: rawErr.cause ? String(rawErr.cause) : null,
+        cause_code: rawErr.cause?.code || null,
+        url_used: supabaseUrl,
+      })
+    }
+
     const supabase = createClient(supabaseUrl, supabaseKey)
 
     const [ji, jr, et, lp, lb] = await Promise.all([
@@ -30,7 +50,10 @@ export default async function handler(req, res) {
 
     const errors = [ji, jr, et, lp, lb].map((r) => r.error?.message).filter(Boolean)
     if (errors.length > 0) {
-      return res.status(500).json({ error: errors.join(' / ') })
+      return res.status(500).json({
+        error: errors.join(' / '),
+        cause_code: ji.error?.cause?.code || jr.error?.cause?.code || null,
+      })
     }
 
     return res.status(200).json({

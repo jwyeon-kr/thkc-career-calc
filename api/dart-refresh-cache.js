@@ -1,12 +1,35 @@
 // Vercel Serverless Function (관리자용, 수동 실행)
-// DART 회사목록 전체를 다운로드해서 Supabase dart_corp_codes 테이블에 한 번 저장한다.
-// 이후 실제 조회(/api/dart-lookup)는 이 캐시 테이블만 빠르게 조회하므로,
-// 매번 대용량 파일을 처리하다 서버가 죽는 문제를 근본적으로 없앤다.
-// 데이터가 오래됐다고 판단될 때(예: 몇 달에 한 번) 이 주소를 브라우저로 직접 열어 재실행하면 된다.
+// DART 회사목록 전체를 Supabase dart_corp_codes 테이블에 저장한다.
+// 데이터가 10만 건 이상이라 한 번의 요청(60초 제한)으로 전부 끝내는 것은 무리이므로,
+// 조금씩(offset/limit) 나눠서 여러 번 호출하는 방식으로 설계했다.
+// 브라우저로 이 주소를 그냥 열면, 자동으로 이어서 호출하며 진행 상황을 보여주는 화면이 뜬다.
 
 import JSZip from 'jszip'
 import { XMLParser } from 'fast-xml-parser'
 import { createClient } from '@supabase/supabase-js'
+
+async function fetchAllRows(apiKey) {
+  const dartRes = await fetch(`https://opendart.fss.or.kr/api/corpCode.xml?crtfc_key=${apiKey}`)
+  if (!dartRes.ok) throw new Error('DART corpCode 다운로드 실패')
+  const buf = await dartRes.arrayBuffer()
+  const zip = await JSZip.loadAsync(buf)
+  const xmlFile = zip.file('CORPCODE.xml')
+  if (!xmlFile) throw new Error('corpCode.xml을 zip에서 찾을 수 없습니다')
+  const xmlText = await xmlFile.async('text')
+  const parser = new XMLParser({ parseTagValue: false })
+  const parsed = parser.parse(xmlText)
+  const list = parsed?.result?.list || []
+  const corpList = Array.isArray(list) ? list : [list]
+
+  return corpList
+    .filter((c) => c.corp_code && c.corp_name)
+    .map((c) => ({
+      corp_code: c.corp_code,
+      corp_name: c.corp_name,
+      stock_code: c.stock_code ? String(c.stock_code).trim() || null : null,
+      updated_at: new Date().toISOString(),
+    }))
+}
 
 export default async function handler(req, res) {
   const apiKey = process.env.DART_API_KEY
@@ -16,48 +39,68 @@ export default async function handler(req, res) {
   if (!apiKey) return res.status(500).json({ error: 'DART_API_KEY가 설정되지 않았습니다.' })
   if (!supabaseUrl || !supabaseKey) return res.status(500).json({ error: 'SUPABASE_URL/SUPABASE_ANON_KEY가 설정되지 않았습니다.' })
 
-  try {
-    const dartRes = await fetch(`https://opendart.fss.or.kr/api/corpCode.xml?crtfc_key=${apiKey}`)
-    if (!dartRes.ok) throw new Error('DART corpCode 다운로드 실패')
-    const buf = await dartRes.arrayBuffer()
-    const zip = await JSZip.loadAsync(buf)
-    const xmlFile = zip.file('CORPCODE.xml')
-    if (!xmlFile) throw new Error('corpCode.xml을 zip에서 찾을 수 없습니다')
-    const xmlText = await xmlFile.async('text')
-    const parser = new XMLParser({ parseTagValue: false })
-    const parsed = parser.parse(xmlText)
-    const list = parsed?.result?.list || []
-    const corpList = Array.isArray(list) ? list : [list]
+  const isJsonCall = req.query.format === 'json'
+  const offset = parseInt(req.query.offset, 10) || 0
+  const limit = parseInt(req.query.limit, 10) || 15000
 
-    const rows = corpList
-      .filter((c) => c.corp_code && c.corp_name)
-      .map((c) => ({
-        corp_code: c.corp_code,
-        corp_name: c.corp_name,
-        stock_code: c.stock_code ? String(c.stock_code).trim() || null : null,
-        updated_at: new Date().toISOString(),
-      }))
+  if (!isJsonCall) {
+    // 브라우저로 직접 열었을 때: 자동으로 이어서 호출하며 진행상황을 보여주는 화면
+    res.setHeader('Content-Type', 'text/html; charset=utf-8')
+    return res.status(200).send(`<!DOCTYPE html>
+<html lang="ko"><head><meta charset="utf-8"><title>DART 캐시 채우기</title>
+<style>body{font-family:sans-serif;padding:40px;max-width:600px;margin:0 auto} #log{white-space:pre-line;font-size:14px;line-height:1.8;background:#f5f5f5;padding:16px;border-radius:8px;margin-top:16px}</style>
+</head><body>
+<h2>DART 회사목록 캐시 채우는 중...</h2>
+<p>이 창을 닫지 말고 완료될 때까지 기다려주세요. 시간이 다소 걸릴 수 있습니다.</p>
+<div id="log">시작합니다...</div>
+<script>
+const logEl = document.getElementById('log');
+function log(msg) { logEl.textContent += '\\n' + msg; }
+async function step(offset) {
+  log('처리 중... (offset=' + offset + ')');
+  const res = await fetch('/api/dart-refresh-cache?format=json&offset=' + offset + '&limit=15000');
+  const data = await res.json();
+  if (data.error) { log('오류 발생: ' + data.error); return; }
+  log('완료: ' + data.inserted + '건 저장 (전체 ' + data.total + '건 중 ' + (offset + data.inserted) + '건 진행)');
+  if (data.done) {
+    log('\\n✅ 전체 완료되었습니다! 이 창을 닫으셔도 됩니다.');
+  } else {
+    step(data.nextOffset);
+  }
+}
+step(0);
+</script>
+</body></html>`)
+  }
+
+  try {
+    const rows = await fetchAllRows(apiKey)
+    const slice = rows.slice(offset, offset + limit)
 
     const supabase = createClient(supabaseUrl, supabaseKey)
-
-    // 대량 데이터라 한 번에 넣지 않고 나눠서 저장하되, 왕복 횟수를 줄이기 위해 여러 묶음을 동시에 병렬 처리
     const CHUNK = 1000
     const PARALLEL = 8
     const chunks = []
-    for (let i = 0; i < rows.length; i += CHUNK) chunks.push(rows.slice(i, i + CHUNK))
+    for (let i = 0; i < slice.length; i += CHUNK) chunks.push(slice.slice(i, i + CHUNK))
 
-    let inserted = 0
     for (let i = 0; i < chunks.length; i += PARALLEL) {
       const batch = chunks.slice(i, i + PARALLEL)
       const results = await Promise.all(
         batch.map((chunk) => supabase.from('dart_corp_codes').upsert(chunk, { onConflict: 'corp_code' }))
       )
       const err = results.find((r) => r.error)
-      if (err) throw new Error(`저장 중 오류 (${i}번째 묶음 그룹): ${err.error.message}`)
-      inserted += batch.reduce((sum, c) => sum + c.length, 0)
+      if (err) throw new Error('저장 중 오류: ' + err.error.message)
     }
 
-    return res.status(200).json({ success: true, total: rows.length, inserted })
+    const nextOffset = offset + limit
+    const done = nextOffset >= rows.length
+    return res.status(200).json({
+      total: rows.length,
+      offset,
+      inserted: slice.length,
+      nextOffset: done ? null : nextOffset,
+      done,
+    })
   } catch (err) {
     return res.status(500).json({ error: '캐시 갱신 중 오류: ' + err.message })
   }

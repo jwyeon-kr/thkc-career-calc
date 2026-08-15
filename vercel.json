@@ -1,0 +1,10 @@
+{
+  "functions": {
+    "api/dart-lookup.js": {
+      "maxDuration": 60
+    },
+    "api/extract.js": {
+      "maxDuration": 60
+    }
+  }
+}

@@ -384,7 +384,7 @@ export default function App() {
   return (
     <div className="container">
       <h1>경력산출 자동화 시스템</h1>
-      <div className="subtitle">인사기획팀 내부 전용 · v2026-08-15-11 (DART 파싱 고속화+진행화면 오류처리)</div>
+      <div className="subtitle">인사기획팀 내부 전용 · v2026-08-15-12 (DART 단계별 로깅)</div>
       <button type="button" className="criteria-toggle" style={{ marginBottom: 14 }} onClick={toggleSettings}>
         {showSettings ? '설정 관리 접기 ▲' : '⚙ 설정 관리 (판단기준 수치 수정)'}
       </button>

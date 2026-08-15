@@ -31,11 +31,13 @@ function extractCorpListFast(xmlText) {
 }
 
 async function fetchAllRows(apiKey, timing) {
+  console.log('[dart-refresh] 1. DART 다운로드 시작')
   const t0 = Date.now()
   const dartRes = await fetch(`https://opendart.fss.or.kr/api/corpCode.xml?crtfc_key=${apiKey}`)
   if (!dartRes.ok) throw new Error('DART corpCode 다운로드 실패')
   const buf = await dartRes.arrayBuffer()
   timing.download = Date.now() - t0
+  console.log(`[dart-refresh] 2. 다운로드 완료 (${timing.download}ms, ${buf.byteLength}바이트)`)
 
   const t1 = Date.now()
   const zip = await JSZip.loadAsync(buf)
@@ -43,10 +45,12 @@ async function fetchAllRows(apiKey, timing) {
   if (!xmlFile) throw new Error('corpCode.xml을 zip에서 찾을 수 없습니다')
   const xmlText = await xmlFile.async('text')
   timing.unzip = Date.now() - t1
+  console.log(`[dart-refresh] 3. 압축해제 완료 (${timing.unzip}ms, XML길이 ${xmlText.length}자)`)
 
   const t2 = Date.now()
   const rawList = extractCorpListFast(xmlText)
   timing.parse = Date.now() - t2
+  console.log(`[dart-refresh] 4. 파싱 완료 (${timing.parse}ms, ${rawList.length}건)`)
 
   const t3 = Date.now()
   const rows = rawList
@@ -58,6 +62,7 @@ async function fetchAllRows(apiKey, timing) {
       updated_at: new Date().toISOString(),
     }))
   timing.map = Date.now() - t3
+  console.log(`[dart-refresh] 5. 정제 완료 (${timing.map}ms, 최종 ${rows.length}건)`)
   return rows
 }
 
@@ -113,6 +118,7 @@ step(0);
   }
 
   try {
+    console.log(`[dart-refresh] 요청 받음 (offset=${offset}, limit=${limit})`)
     const timing = {}
     const rows = await fetchAllRows(apiKey, timing)
     const slice = rows.slice(offset, offset + limit)
@@ -124,6 +130,7 @@ step(0);
     for (let i = 0; i < slice.length; i += CHUNK) chunks.push(slice.slice(i, i + CHUNK))
 
     const tUpload = Date.now()
+    console.log(`[dart-refresh] 6. 저장 시작 (offset=${offset}, ${slice.length}건, ${chunks.length}묶음)`)
     for (let i = 0; i < chunks.length; i += PARALLEL) {
       const batch = chunks.slice(i, i + PARALLEL)
       const results = await Promise.all(
@@ -131,8 +138,10 @@ step(0);
       )
       const err = results.find((r) => r.error)
       if (err) throw new Error('저장 중 오류: ' + err.error.message)
+      console.log(`[dart-refresh]    - ${Math.min(i + PARALLEL, chunks.length)}/${chunks.length}묶음 완료 (${Date.now() - tUpload}ms 경과)`)
     }
     timing.upload = Date.now() - tUpload
+    console.log(`[dart-refresh] 7. 저장 완료 (${timing.upload}ms)`)
 
     const nextOffset = offset + limit
     const done = nextOffset >= rows.length

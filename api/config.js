@@ -34,3 +34,24 @@ export default async function handler(req, res) {
     const errors = [ji, jr, et, lp, lb, cb].map((r) => r.error?.message).filter(Boolean)
     if (errors.length > 0) {
       return res.status(500).json({
+        error: errors.join(' / '),
+        cause_code: ji.error?.cause?.code || jr.error?.cause?.code || null,
+      })
+    }
+
+    return res.status(200).json({
+      jobIndustry: ji.data || [],
+      jobRevenue: jr.data || [],
+      employmentType: et.data || [],
+      leadershipPremium: lp.data?.[0]?.weight_percent ?? 10,
+      listedBonus: lb.data?.[0]?.weight_percent ?? 10,
+      careDomainBonus: cb.data?.[0]?.weight_percent ?? 10,
+    })
+  } catch (err) {
+    return res.status(500).json({
+      error: 'Supabase 조회 중 오류: ' + err.message,
+      cause: err.cause ? String(err.cause) : null,
+      url_used: (process.env.SUPABASE_URL || '(없음)').trim(),
+    })
+  }
+}

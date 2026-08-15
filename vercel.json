@@ -11,5 +11,11 @@
     "api/extract.js": {
       "maxDuration": 60
     }
-  }
+  },
+  "crons": [
+    {
+      "path": "/api/dart-refresh-cache",
+      "schedule": "0 19 * * *"
+    }
+  ]
 }

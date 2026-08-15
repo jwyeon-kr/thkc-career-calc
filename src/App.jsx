@@ -16,12 +16,12 @@ function newEntry() {
     start_date: '',
     end_date: '',
     employment_type: '정규직',
-    job_match: '동일',
-    industry_match: '동종',
-    revenue_bracket: '당사미만',
+    job_match: '',       // '' = 미확인 (담당자가 직접 판단하거나 AI 제안을 받아야 함)
+    industry_match: '',  // '' = 미확인
+    revenue_bracket: '', // '' = 미확인
     revenue_source: 'manual',
     revenue_raw_value: '',
-    care_domain_match: '기타',
+    care_domain_match: '', // '' = 미확인
     leadership_start_date: '',
     leadership_end_date: '',
     listed_bonus_eligible_job: false,
@@ -45,7 +45,7 @@ export default function App() {
   const [expandedIds, setExpandedIds] = useState(() => new Set([firstEntry.id]))
   const [config, setConfig] = useState(null)
   const [result, setResult] = useState(null)
-  const [tab, setTab] = useState('manual') // manual | upload
+  const [tab, setTab] = useState('upload') // manual | upload
   const [uploading, setUploading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [history, setHistory] = useState([])
@@ -172,7 +172,7 @@ export default function App() {
       return
     }
     if (!entry.job_title?.trim()) {
-      alert('이 경력의 "담당 직무명"을 입력해주세요.')
+      alert('이 경력에는 이력서에서 추출된 직무명이 없어 AI 제안을 쓸 수 없습니다 (이력서 업로드 없이 직접 추가한 경력으로 보입니다). 직무매칭을 직접 선택해주세요.')
       return
     }
     updateEntry(entryId, 'job_match_suggesting', true)
@@ -240,7 +240,7 @@ export default function App() {
         start_date: c.start_date || '',
         end_date: c.end_date || '',
         employment_type: EMPLOYMENT_TYPES.includes(c.employment_type_guess) ? c.employment_type_guess : '정규직',
-        job_match: MATCH_LEVELS.includes(c.job_match_suggestion) ? c.job_match_suggestion : '동일',
+        job_match: MATCH_LEVELS.includes(c.job_match_suggestion) ? c.job_match_suggestion : '',
         listed_bonus_eligible_job: suggestListedBonusEligible(c.job_title || ''),
       }))
       if (extracted.length > 0) {
@@ -324,6 +324,18 @@ export default function App() {
       alert('회사명/입사일/퇴사일이 입력된 경력이 최소 1건 필요합니다.')
       return
     }
+
+    const unconfirmed = validEntries.filter(
+      (e) => !e.job_match || !e.industry_match || !e.revenue_bracket || !e.care_domain_match
+    )
+    if (unconfirmed.length > 0) {
+      const names = unconfirmed.map((e) => e.company_name).join(', ')
+      alert(
+        `아래 경력에 "미확인" 상태인 판단항목(직무매칭/업종매칭/매출구간/돌봄도메인)이 있어 계산할 수 없습니다.\n\n대상: ${names}\n\n해당 카드를 펼쳐서 항목을 확인/선택해주세요.`
+      )
+      return
+    }
+
     const r = calcAll(validEntries, config)
     setResult(r)
   }
@@ -384,7 +396,7 @@ export default function App() {
   return (
     <div className="container">
       <h1>경력산출 자동화 시스템</h1>
-      <div className="subtitle">인사기획팀 내부 전용 · v2026-08-15-13 (서울리전+DART 타임아웃 20초)</div>
+      <div className="subtitle">인사기획팀 내부 전용 · v2026-08-15-16 (DART자동갱신+직무매칭 재설계)</div>
       <button type="button" className="criteria-toggle" style={{ marginBottom: 14 }} onClick={toggleSettings}>
         {showSettings ? '설정 관리 접기 ▲' : '⚙ 설정 관리 (판단기준 수치 수정)'}
       </button>
@@ -522,20 +534,11 @@ export default function App() {
       {/* 1. 지원자 정보 + 업로드 */}
       <div className="card">
         <h2>1. 지원자 정보</h2>
-        <div className="row">
-          <div className="field">
-            <label>지원자 이름</label>
-            <input value={applicantName} onChange={(e) => setApplicantName(e.target.value)} />
-          </div>
-          <div className="field">
-            <label>지원 직무</label>
-            <input value={targetJob} onChange={(e) => setTargetJob(e.target.value)} />
-          </div>
-        </div>
+        <p className="upload-first-hint">📄 이력서부터 업로드해주세요 — 이름 등 기본정보가 자동으로 채워집니다.</p>
 
         <div className="tab-group">
-          <button className={tab === 'manual' ? 'active' : ''} onClick={() => setTab('manual')}>정형 입력</button>
           <button className={tab === 'upload' ? 'active' : ''} onClick={() => setTab('upload')}>이력서 업로드</button>
+          <button className={tab === 'manual' ? 'active' : ''} onClick={() => setTab('manual')}>정형 입력</button>
         </div>
         {tab === 'upload' && (
           <div className="upload-box" onClick={() => fileInputRef.current?.click()}>
@@ -549,6 +552,17 @@ export default function App() {
             />
           </div>
         )}
+
+        <div className="row" style={{ marginTop: 14 }}>
+          <div className="field">
+            <label>지원자 이름</label>
+            <input value={applicantName} onChange={(e) => setApplicantName(e.target.value)} />
+          </div>
+          <div className="field">
+            <label>지원 직무</label>
+            <input value={targetJob} onChange={(e) => setTargetJob(e.target.value)} />
+          </div>
+        </div>
       </div>
 
       {/* 2. 경력사항 */}
@@ -584,13 +598,15 @@ export default function App() {
             </ul>
             <h4>고용형태 계수</h4>
             <ul>
-              <li>정규직 100% / 계약직 85% / 파견 75% / 인턴 40%</li>
+              <li>{config?.employmentType?.length
+                ? config.employmentType.map((r) => `${r.employment_type} ${r.weight_percent}%`).join(' / ')
+                : '불러오는 중...'}</li>
             </ul>
-            <h4>리더십 프리미엄 (+10%)</h4>
+            <h4>리더십 프리미엄 (+{config?.leadershipPremium ?? '-'}%)</h4>
             <ul>
               <li>재직기간 전체가 아닌, 실제 팀장·파트장 직책을 수행한 기간에만 적용</li>
             </ul>
-            <h4>상장가산 (+10%)</h4>
+            <h4>상장가산 (+{config?.listedBonus ?? '-'}%)</h4>
             <ul>
               <li>적용 대상: 재무회계 / IR / 감사대응 등 공시·감사·재무보고 업무 관련 직무</li>
               <li>"상장가산대상"은 이력서 직무명 기반 시스템 제안이며, "실제업무확인"에 담당자가 체크해야 최종 계산에 반영됨</li>
@@ -642,17 +658,10 @@ export default function App() {
                       </select>
                     </div>
                     <div className="entry-field">
-                      <label>담당 직무명</label>
-                      <input
-                        placeholder="예: 인사기획 팀장"
-                        value={e.job_title}
-                        onChange={(ev) => updateEntry(e.id, 'job_title', ev.target.value)}
-                      />
-                    </div>
-                    <div className="entry-field">
                       <label>직무매칭</label>
                       <div className="entry-revenue-row">
-                        <select value={e.job_match} onChange={(ev) => updateEntry(e.id, 'job_match', ev.target.value)}>
+                        <select value={e.job_match} onChange={(ev) => updateEntry(e.id, 'job_match', ev.target.value)} className={!e.job_match ? 'unconfirmed' : ''}>
+                          <option value="">미확인</option>
                           {MATCH_LEVELS.map((v) => <option key={v}>{v}</option>)}
                         </select>
                         <button
@@ -664,10 +673,12 @@ export default function App() {
                           {e.job_match_suggesting ? '제안중...' : 'AI 제안'}
                         </button>
                       </div>
+                      {e.job_title && <div className="entry-field-hint">이력서상 직무: {e.job_title}</div>}
                     </div>
                     <div className="entry-field">
                       <label>업종매칭</label>
-                      <select value={e.industry_match} onChange={(ev) => updateEntry(e.id, 'industry_match', ev.target.value)}>
+                      <select value={e.industry_match} onChange={(ev) => updateEntry(e.id, 'industry_match', ev.target.value)} className={!e.industry_match ? 'unconfirmed' : ''}>
+                        <option value="">미확인</option>
                         <option value="동종">동종</option><option value="유사">유사</option><option value="기타">기타</option>
                       </select>
                       {(e.market_hint || e.established_hint) && (
@@ -679,7 +690,8 @@ export default function App() {
                     </div>
                     <div className="entry-field">
                       <label>돌봄도메인</label>
-                      <select value={e.care_domain_match} onChange={(ev) => updateEntry(e.id, 'care_domain_match', ev.target.value)}>
+                      <select value={e.care_domain_match} onChange={(ev) => updateEntry(e.id, 'care_domain_match', ev.target.value)} className={!e.care_domain_match ? 'unconfirmed' : ''}>
+                        <option value="">미확인</option>
                         {MATCH_LEVELS.map((v) => <option key={v}>{v}</option>)}
                       </select>
                     </div>
@@ -695,7 +707,8 @@ export default function App() {
                     <div className="entry-field entry-field-full">
                       <label>매출구간</label>
                       <div className="entry-revenue-row">
-                        <select value={e.revenue_bracket} onChange={(ev) => { updateEntry(e.id, 'revenue_bracket', ev.target.value); updateEntry(e.id, 'revenue_source', 'manual') }}>
+                        <select value={e.revenue_bracket} onChange={(ev) => { updateEntry(e.id, 'revenue_bracket', ev.target.value); updateEntry(e.id, 'revenue_source', 'manual') }} className={!e.revenue_bracket ? 'unconfirmed' : ''}>
+                          <option value="">미확인</option>
                           {REVENUE_BRACKETS.map((v) => <option key={v}>{v}</option>)}
                         </select>
                         <button
@@ -760,11 +773,12 @@ export default function App() {
           <button className="secondary" onClick={addEntry}>+ 경력 추가</button>
         </div>
         <p style={{ fontSize: 12, color: '#888', marginTop: 10 }}>
-          ※ "DART 조회" 버튼으로 매출액 자동조회가 가능합니다 (상장사·외부감사대상 비상장사만 조회됨. 조회 실패 시 직접 선택해주세요).
+          ※ 직무매칭/업종매칭/매출구간/돌봄도메인은 기본값이 없고 "미확인"(노란색 표시) 상태로 시작합니다. 담당자가 직접 판단해서 선택해야 하며, 미확인 항목이 남아있으면 계산이 진행되지 않습니다.
+          "DART 조회" 버튼으로 매출액 자동조회가 가능합니다 (상장사·외부감사대상 비상장사만 조회됨. 조회 실패 시 직접 선택해주세요).
           동일 이름의 회사가 여러 건이면 후보 목록에서 선택할 수 있습니다.
           복지법인/장기요양기관 특례는 돌봄도메인을 "동일"로 선택하면 자동 반영됩니다.
           상장가산 대상 여부는 이력서 직무명을 기반으로 제안되며, 최종 확정은 담당자가 실제 업무수행을 확인한 뒤 체크해야 합니다.
-          이력서 업로드 시 직무매칭(동일/유사/기타)도 지원직무와 비교하여 AI가 제안하지만, 최종 판단은 담당자가 확인 후 수정해주세요.
+          직무매칭은 이력서에서 추출된 직무명과 상단 "지원 직무"를 "AI 제안" 버튼을 누른 시점에 비교해서 제안합니다 (지원 직무를 수정한 뒤 다시 눌러도 재비교됩니다). 이력서 업로드 없이 직접 추가한 경력은 비교할 원문이 없어 AI 제안을 쓸 수 없으니 직접 선택해주세요. 최종 판단은 담당자가 확인 후 수정해주세요.
         </p>
       </div>
 

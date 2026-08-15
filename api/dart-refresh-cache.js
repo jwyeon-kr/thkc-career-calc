@@ -81,9 +81,16 @@ export default async function handler(req, res) {
   if (!apiKey) return res.status(500).json({ error: 'DART_API_KEY가 설정되지 않았습니다.' })
   if (!supabaseUrl || !supabaseKey) return res.status(500).json({ error: 'SUPABASE_URL/SUPABASE_ANON_KEY가 설정되지 않았습니다.' })
 
-  const isJsonCall = req.query.format === 'json'
-  const offset = parseInt(req.query.offset, 10) || 0
-  const limit = parseInt(req.query.limit, 10) || 15000
+  // Vercel Cron이 자동으로 호출할 때는 User-Agent에 'vercel-cron'이 포함됨.
+  // 이 경우 offset/limit 분할 없이 전체를 한 번에 처리한다 (실측상 전체 처리시간이 약 20초 내외라 60초 제한 안에 충분히 끝남).
+  const isCronCall = (req.headers['user-agent'] || '').includes('vercel-cron')
+  const isJsonCall = req.query.format === 'json' || isCronCall
+  const offset = isCronCall ? 0 : parseInt(req.query.offset, 10) || 0
+  const limit = isCronCall ? Number.MAX_SAFE_INTEGER : parseInt(req.query.limit, 10) || 15000
+
+  if (isCronCall) {
+    console.log('[dart-refresh] Vercel Cron에 의한 자동 정기 갱신 시작')
+  }
 
   if (!isJsonCall) {
     // 브라우저로 직접 열었을 때: 자동으로 이어서 호출하며 진행상황을 보여주는 화면

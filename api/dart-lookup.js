@@ -32,10 +32,11 @@ async function findCandidatesFromCache(supabase, inputName) {
   if (!count) return { candidates: [], cacheEmpty: true }
 
   // ilike로 넓게 후보를 가져온 뒤, 공백/㈜ 등을 뗀 정규화 비교로 정확히 다시 거름
+  // (1차 검색부터 정규화된 이름을 써야 함: "삼성전자㈜"로 입력해도 DB의 "삼성전자"가 걸리도록)
   const { data, error } = await supabase
     .from('dart_corp_codes')
     .select('corp_code, corp_name, stock_code')
-    .ilike('corp_name', `%${inputName.trim()}%`)
+    .ilike('corp_name', `%${target}%`)
     .limit(50)
   if (error) throw new Error('캐시 조회 오류: ' + error.message)
 

@@ -40,14 +40,21 @@ export default async function handler(req, res) {
 
     const supabase = createClient(supabaseUrl, supabaseKey)
 
-    // 대량 데이터라 한 번에 넣지 않고 나눠서 저장 (한 번에 너무 크면 실패할 수 있음)
+    // 대량 데이터라 한 번에 넣지 않고 나눠서 저장하되, 왕복 횟수를 줄이기 위해 여러 묶음을 동시에 병렬 처리
     const CHUNK = 1000
+    const PARALLEL = 8
+    const chunks = []
+    for (let i = 0; i < rows.length; i += CHUNK) chunks.push(rows.slice(i, i + CHUNK))
+
     let inserted = 0
-    for (let i = 0; i < rows.length; i += CHUNK) {
-      const chunk = rows.slice(i, i + CHUNK)
-      const { error } = await supabase.from('dart_corp_codes').upsert(chunk, { onConflict: 'corp_code' })
-      if (error) throw new Error(`저장 중 오류 (${i}번째 묶음): ${error.message}`)
-      inserted += chunk.length
+    for (let i = 0; i < chunks.length; i += PARALLEL) {
+      const batch = chunks.slice(i, i + PARALLEL)
+      const results = await Promise.all(
+        batch.map((chunk) => supabase.from('dart_corp_codes').upsert(chunk, { onConflict: 'corp_code' }))
+      )
+      const err = results.find((r) => r.error)
+      if (err) throw new Error(`저장 중 오류 (${i}번째 묶음 그룹): ${err.error.message}`)
+      inserted += batch.reduce((sum, c) => sum + c.length, 0)
     }
 
     return res.status(200).json({ success: true, total: rows.length, inserted })

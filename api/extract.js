@@ -1,12 +1,13 @@
 // Vercel Serverless Function
-// 이력서 파일(PDF/이미지, base64)을 받아 Anthropic API로 경력 정보를 구조화 추출한다.
-// ANTHROPIC_API_KEY는 서버 환경변수로만 존재하며 프론트엔드에 노출되지 않는다.
-
-// Vercel Serverless Function
 // Supabase Storage에 업로드된 이력서 파일(storagePath)을 서버에서 직접 내려받아
 // Anthropic API로 경력 정보를 구조화 추출한다.
 // (예전에는 브라우저가 base64로 인코딩해 직접 보냈으나, Vercel 서버 함수의 요청 본문 크기
 //  제한(약 4.5MB, 변경 불가)에 걸려 대용량 파일이 실패하는 문제가 있어 이 방식으로 변경함)
+//
+// [2026-08-15 수정] company_name / department / job_title 분리 실패 문제 대응:
+// 기존에는 "job_title" 하나에 부서+직무가 뭉쳐서 들어가는 문제가 있었음(예: "재무회계팀.회계").
+// company_name, department, job_title 3개 필드로 명확히 분리하고,
+// 분리가 애매한 경우 raw_position_text(원문)를 항상 함께 반환해 저장 단계에서 fallback으로 쓸 수 있게 함.
 
 import { createClient } from '@supabase/supabase-js'
 
@@ -43,7 +44,7 @@ export default async function handler(req, res) {
   const isPdf = mediaType === 'application/pdf'
 
   const jobMatchInstruction = targetJob
-    ? `지원 직무는 "${targetJob}"입니다. 각 경력의 직무(job_title)를 지원 직무와 비교하여 "job_match_suggestion" 필드에 다음 기준으로 분류해 함께 반환하세요:
+    ? `지원 직무는 "${targetJob}"입니다. 각 경력의 "job_title"(부서가 아닌 실제 수행 직무만)을 지원 직무와 비교하여 "job_match_suggestion" 필드에 다음 기준으로 분류해 함께 반환하세요:
 - "동일": 지원 직무와 실질적으로 같은 직무 분야
 - "유사": 같은 큰 직군(예: 인사/재무/영업 등)이지만 세부 분야가 다름
 - "기타": 관련성이 낮은 다른 직무
@@ -57,14 +58,18 @@ export default async function handler(req, res) {
   "applicant_name": "지원자 이름 (확인 불가시 빈 문자열)",
   "career_entries": [
     {
-      "company_name": "회사명",
+      "company_name": "회사명만 (부서/직무 절대 포함하지 말 것, 예: '프레스티지바이오파마아이디씨㈜')",
+      "department": "부서명만 (확인 불가시 빈 문자열, 예: '재무회계팀')",
+      "job_title": "실제 수행 직무만 (부서명 제외, 예: '회계'). '부서.직무' 형태로 뭉쳐서 표기된 원문이라도 여기에는 직무만 넣을 것",
+      "raw_position_text": "이력서에 표기된 직책/부서/직무 원문 그대로 (분리가 애매할 때 대조용, 예: '재무회계팀.회계')",
       "start_date": "YYYY-MM-DD (일자 불명확 시 YYYY-MM-01)",
       "end_date": "YYYY-MM-DD (재직중이면 오늘 날짜)",
-      "job_title": "직무/직책",
       "employment_type_guess": "정규직/계약직/파견/인턴 중 이력서에서 유추 가능하면 표기, 불명확하면 '정규직'"${targetJob ? ',\n      "job_match_suggestion": "동일/유사/기타 중 하나"' : ''}
     }
   ]
 }
+
+중요: company_name, department, job_title은 반드시 분리하세요. 이력서에 "OO팀.OO" 또는 "OO팀 - OO담당"처럼 부서와 직무가 한 표기로 붙어 있어도, 마침표/줄바꿈/하이픈 등을 기준으로 부서와 직무를 나누어 각각의 필드에 넣으세요. 분리가 정말 불가능한 경우에만 job_title에 원문 전체를 넣고, department는 빈 문자열로 두세요.
 
 ${jobMatchInstruction}
 날짜를 알 수 없으면 최대한 합리적으로 추정하되, 확실하지 않은 항목은 비워두지 말고 빈 문자열 대신 추정값을 넣으세요.`
@@ -88,7 +93,7 @@ ${jobMatchInstruction}
         messages: [
           {
             role: 'user',
-            content: [contentBlock, { type: 'text', text: '이 이력서에서 경력 정보를 JSON으로 추출해줘.' }],
+            content: [contentBlock, { type: 'text', text: '이 이력서에서 경력 정보를 JSON으로 추출해줘. company_name/department/job_title은 반드시 분리해줘.' }],
           },
         ],
       }),

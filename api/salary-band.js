@@ -37,12 +37,17 @@ function parseSalaryBandWorkbook(buffer) {
   }
   if (headerRow === -1) throw new Error('헤더 행("구분")을 찾지 못했습니다. 엑셀 구조를 확인해주세요.')
 
-  // 직무군 이름은 "구분" 헤더 행보다 2행 위 (본부/직무군명), 1행 위(세부 직무 나열)에 있음
+  // 직무군 이름은 "구분" 헤더 행보다 2행 위(본부/센터명), 1행 위(소속 세부 직무 나열)에 각각 있음.
+  // 본부명은 category로, 세부직무 나열은 job_functions로 별도 저장 — AI 자동매칭 시 세부직무까지 참고해야
+  // 정확도가 나오므로 둘 다 보존한다 (이전 버전은 본부명만 남기고 세부직무를 버려서 매칭 정확도가 낮았음).
   const categories = []
+  const jobFunctionsByCategory = []
   for (let k = 0; k < NUM_CATEGORIES; k++) {
     const col = JOB_CATEGORY_START_COL + k * 2
-    const name = cell(headerRow - 2, col) || cell(headerRow - 1, col) || `직무군${k + 1}`
-    categories.push(String(name).trim())
+    const divisionName = cell(headerRow - 2, col)
+    const jobDetail = cell(headerRow - 1, col)
+    categories.push(String(divisionName || jobDetail || `직무군${k + 1}`).trim())
+    jobFunctionsByCategory.push(jobDetail ? String(jobDetail).trim() : null)
   }
 
   const rows = []
@@ -67,6 +72,7 @@ function parseSalaryBandWorkbook(buffer) {
           year_num: yearNum,
           step: stepLabel === '초임' ? 1 : Number(stepLabel) || 1,
           category: categories[k],
+          job_functions: jobFunctionsByCategory[k],
           min_salary: minVal != null && !isNaN(minVal) ? Math.round(Number(minVal) / 100) * 100 : null,
           max_salary: maxVal != null && !isNaN(maxVal) ? Math.round(Number(maxVal) / 100) * 100 : null,
           base_salary: baseSalary != null && !isNaN(baseSalary) ? Number(baseSalary) : null,

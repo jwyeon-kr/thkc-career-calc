@@ -26,17 +26,29 @@ export default async function handler(req, res) {
   const supabase = createClient(supabaseUrl, supabaseKey)
 
   try {
-    const { data, error } = await supabase.from('salary_bands').select('category')
+    const { data, error } = await supabase.from('salary_bands').select('category, job_functions')
     if (error) return res.status(500).json({ error: '직무군 목록 조회 실패: ' + error.message })
-    const categories = [...new Set((data || []).map((r) => r.category))]
+
+    // 본부명(category)별 세부직무(job_functions)를 중복 없이 매핑 — AI 매칭 정확도를 위해 세부직무까지 함께 프롬프트에 반영
+    const categoryMap = new Map()
+    for (const row of data || []) {
+      if (!categoryMap.has(row.category)) categoryMap.set(row.category, row.job_functions)
+    }
+    const categories = [...categoryMap.keys()]
     if (categories.length === 0) {
       return res.status(200).json({ category: null, reason: '연봉밴드 데이터가 아직 업로드되지 않았습니다.' })
     }
 
-    const systemPrompt = `당신은 지원 직무명을 회사의 직무군 카테고리로 분류하는 도구입니다.
+    const categoryDescriptions = categories
+      .map((c) => (categoryMap.get(c) ? `${c} (${categoryMap.get(c)})` : c))
+      .join(' / ')
+
+    const systemPrompt = `당신은 지원 직무명을 회사의 본부(직무군)로 분류하는 도구입니다.
+각 본부에는 괄호 안에 소속 세부 직무가 나열되어 있습니다. 지원 직무가 이 세부 직무 목록과 가장 잘 맞는 본부를 선택하세요.
 아래 JSON 형식으로만 응답하세요. 다른 설명 없이 순수 JSON만 출력합니다.
-{"category": "다음 중 정확히 하나: ${categories.join(' / ')}"}
-분류가 애매하면 가장 근접한 직무군을 선택하세요.`
+{"category": "다음 중 정확히 하나 (괄호 안 세부직무 제외, 본부명만): ${categories.join(' / ')}"}
+본부 목록과 소속 세부직무: ${categoryDescriptions}
+분류가 애매하면 세부직무 키워드와 가장 근접한 본부를 선택하세요.`
 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',

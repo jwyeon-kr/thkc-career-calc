@@ -69,8 +69,6 @@ function HistoryEntryDetail({ entry }) {
   )
 }
 
-// 인정경력년차 + 직무군으로 저장된 연봉밴드에서 해당 구간을 찾는다.
-// 테이블에 있는 최대 년차보다 크면 "임원급, 데이터 없음"으로 처리(회사 방침: 22~25년차는 임원급이라 채용 대상이 거의 없어 데이터 미비 허용)
 function findSalaryBand(bands, roundedYears, category) {
   if (!bands || bands.length === 0 || !category) return null
   const maxYear = Math.max(...bands.map((b) => b.year_num))
@@ -90,8 +88,46 @@ function findSalaryBand(bands, roundedYears, category) {
   }
 }
 
+function formatComma(v) {
+  if (v === null || v === undefined || v === '') return ''
+  const n = Number(v)
+  return isNaN(n) ? '' : n.toLocaleString('ko-KR')
+}
+function parseComma(v) {
+  if (v === null || v === undefined || v === '') return null
+  const n = Number(String(v).replace(/,/g, ''))
+  return isNaN(n) ? null : n
+}
+
+function groupBandsByGrade(bands) {
+  const gradeOrder = []
+  const gradeMap = new Map()
+  const categoriesSeen = []
+
+  for (const row of bands) {
+    if (!gradeMap.has(row.grade)) {
+      gradeMap.set(row.grade, new Map())
+      gradeOrder.push(row.grade)
+    }
+    const yearsMap = gradeMap.get(row.grade)
+    if (!yearsMap.has(row.year_num)) yearsMap.set(row.year_num, new Map())
+    yearsMap.get(row.year_num).set(row.category, row)
+    if (!categoriesSeen.includes(row.category)) categoriesSeen.push(row.category)
+  }
+
+  return {
+    categories: categoriesSeen,
+    grades: gradeOrder.map((grade) => ({
+      grade,
+      years: [...gradeMap.get(grade).entries()]
+        .sort((a, b) => a[0] - b[0])
+        .map(([year_num, catMap]) => ({ year_num, cells: catMap })),
+    })),
+  }
+}
+
 export default function App() {
-  const [mainTab, setMainTab] = useState('calc') // calc | history | salary
+  const [mainTab, setMainTab] = useState('calc')
   const [applicantName, setApplicantName] = useState('')
   const [targetJob, setTargetJob] = useState('')
   const [firstEntry] = useState(() => newEntry())
@@ -115,13 +151,13 @@ export default function App() {
   const [historyDeleting, setHistoryDeleting] = useState(false)
   const [expandedHistoryIds, setExpandedHistoryIds] = useState(new Set())
 
-  // 연봉밴드 관련 상태
   const [salaryBands, setSalaryBands] = useState([])
   const [salaryLastUpload, setSalaryLastUpload] = useState(null)
   const [salaryUploading, setSalaryUploading] = useState(false)
   const [salaryMsg, setSalaryMsg] = useState('')
   const [salaryEdits, setSalaryEdits] = useState({})
   const [salaryRowSavingId, setSalaryRowSavingId] = useState('')
+  const [expandedGrades, setExpandedGrades] = useState(new Set())
   const [matchedCategory, setMatchedCategory] = useState(null)
   const [categoryMatching, setCategoryMatching] = useState(false)
   const [salaryBandResult, setSalaryBandResult] = useState(null)
@@ -167,6 +203,13 @@ export default function App() {
   async function handleSalaryUpload(e) {
     const file = e.target.files[0]
     if (!file) return
+    const confirmMsg = salaryBands.length > 0
+      ? `기존 연봉밴드 데이터(${salaryBands.length}건)를 비활성화하고 새 파일("${file.name}")로 교체합니다.\n(기존 데이터는 삭제되지 않고 보관되며, 필요 시 관리자가 DB에서 복구할 수 있습니다.)\n\n계속하시겠습니까?`
+      : `연봉밴드 파일("${file.name}")을 업로드합니다. 계속하시겠습니까?`
+    if (!confirm(confirmMsg)) {
+      if (salaryFileInputRef.current) salaryFileInputRef.current.value = ''
+      return
+    }
     setSalaryUploading(true)
     setSalaryMsg('')
     try {
@@ -193,9 +236,9 @@ export default function App() {
     window.open('/api/salary-band?format=xlsx', '_blank')
   }
 
-  async function saveSalaryBandRow(id, field, value) {
-    const num = Number(value)
-    if (isNaN(num)) {
+  async function saveSalaryBandRow(id, field, rawValue) {
+    const num = parseComma(rawValue)
+    if (num === null) {
       setSalaryMsg('숫자만 입력 가능합니다.')
       return
     }
@@ -216,6 +259,15 @@ export default function App() {
     } finally {
       setSalaryRowSavingId('')
     }
+  }
+
+  function toggleGradeExpand(grade) {
+    setExpandedGrades((prev) => {
+      const next = new Set(prev)
+      if (next.has(grade)) next.delete(grade)
+      else next.add(grade)
+      return next
+    })
   }
 
   function updateEntry(id, field, value) {
@@ -505,7 +557,6 @@ export default function App() {
     setSalaryBandResult(null)
     setMatchedCategory(null)
 
-    // 계산 직후, 지원 직무 텍스트로 연봉밴드 직무군을 AI가 자동 분류하고 예상 직급/연봉범위를 매칭
     if (targetJob.trim() && salaryBands.length > 0) {
       setCategoryMatching(true)
       try {
@@ -521,7 +572,7 @@ export default function App() {
           setSalaryBandResult(band)
         }
       } catch {
-        // 연봉밴드 매칭 실패는 경력산출 결과 자체에는 영향 없음 (참고 정보이므로)
+        // 연봉밴드 매칭 실패는 경력산출 결과 자체에는 영향 없음
       } finally {
         setCategoryMatching(false)
       }
@@ -536,6 +587,7 @@ export default function App() {
     setSaving(true)
     setSaveMsg('')
     try {
+      const resultWithSalary = { ...result, matchedCategory, salaryBandResult }
       const res = await fetch('/api/applicants', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -543,7 +595,7 @@ export default function App() {
           applicantName,
           targetJob,
           entries: result.perEntry,
-          result,
+          result: resultWithSalary,
         }),
       })
       const data = await safeJson(res)
@@ -579,10 +631,12 @@ export default function App() {
     }
   }
 
+  const salaryGrid = groupBandsByGrade(salaryBands)
+
   return (
     <div className="container">
       <h1>경력산출 자동화 시스템</h1>
-      <div className="subtitle">인사기획팀 내부 전용 · v2026-08-16-02 (연봉밴드 매칭 추가)</div>
+      <div className="subtitle">인사기획팀 내부 전용 · v2026-08-16-03 (연봉밴드 UI 개편)</div>
 
       <div className="tab-group" style={{ marginBottom: 20 }}>
         <button className={mainTab === 'calc' ? 'active' : ''} onClick={() => setMainTab('calc')}>경력산출</button>
@@ -831,7 +885,7 @@ export default function App() {
                 </ul>
                 <h4>연봉밴드 매칭 (참고)</h4>
                 <ul>
-                  <li>계산 후 "지원 직무" 텍스트를 AI가 회사 연봉밴드의 직무군으로 자동 분류하고, 인정경력 년차와 매칭해 예상 직급·연봉범위를 함께 보여줍니다 (참고용, 최종 처우는 별도 협의)</li>
+                  <li>계산 후 "지원 직무" 텍스트를 AI가 회사 연봉밴드의 본부(직무군)로 자동 분류하고, 인정경력 년차와 매칭해 예상 직급·연봉범위를 함께 보여줍니다 (참고용, 최종 처우는 별도 협의). 저장 시 이 정보도 함께 기록됩니다.</li>
                 </ul>
               </div>
             )}
@@ -1101,13 +1155,14 @@ export default function App() {
                           onChange={(ev) => setSelectedHistoryIds(ev.target.checked ? new Set(history.map((h) => h.id)) : new Set())}
                         />
                       </th>
-                      <th>이름</th><th>직무군</th><th>인정경력</th><th>날짜</th><th style={{ width: 60 }}></th>
+                      <th>이름</th><th>직무군</th><th>인정경력</th><th>예상직급/연봉</th><th>날짜</th><th style={{ width: 60 }}></th>
                     </tr>
                   </thead>
                   <tbody>
                     {history.map((h) => {
                       const isExpanded = expandedHistoryIds.has(h.id)
                       const snapshot = h.calc_snapshot
+                      const sb = snapshot?.salaryBandResult
                       return (
                         <React.Fragment key={h.id}>
                           <tr>
@@ -1121,6 +1176,9 @@ export default function App() {
                             <td>{h.applicants?.name || '(이름없음)'}</td>
                             <td>{h.applicants?.target_job || '-'}</td>
                             <td>{h.rounded_years}년차 ({Number(h.total_recognized_years).toFixed(2)}년)</td>
+                            <td style={{ fontSize: 12 }}>
+                              {sb && !sb.noData ? `${sb.grade}${sb.step}호봉 · ${sb.minSalary.toLocaleString('ko-KR')}~${sb.maxSalary.toLocaleString('ko-KR')}천원` : '-'}
+                            </td>
                             <td>{new Date(h.calculated_at).toLocaleDateString('ko-KR')}</td>
                             <td>
                               <button
@@ -1136,7 +1194,7 @@ export default function App() {
                           </tr>
                           {isExpanded && snapshot && (
                             <tr>
-                              <td colSpan={6} style={{ background: '#fafafa', padding: 14 }}>
+                              <td colSpan={7} style={{ background: '#fafafa', padding: 14 }}>
                                 {(snapshot.perEntry || []).map((entry) => (
                                   <HistoryEntryDetail key={entry.id} entry={entry} />
                                 ))}
@@ -1159,7 +1217,7 @@ export default function App() {
           <h2>연봉밴드 관리</h2>
           <p style={{ fontSize: 12, color: '#888', marginBottom: 12 }}>
             인사기획팀에서 관리하는 직급/연봉밴드 엑셀을 업로드하면, 경력산출 결과(인정경력 년차)와 지원 직무를 매칭해 예상 직급·연봉범위를 자동으로 보여줍니다.
-            업데이트 시 새 엑셀을 다시 업로드하면 기존 데이터를 전부 교체합니다.
+            업데이트 시 새 엑셀을 다시 업로드하면 기존 데이터는 비활성화되고 새 데이터로 교체됩니다 (완전 삭제되지 않아 필요 시 복구 가능).
           </p>
           <div className="btn-row" style={{ marginTop: 0, marginBottom: 10 }}>
             <button onClick={() => salaryFileInputRef.current?.click()} disabled={salaryUploading}>
@@ -1185,65 +1243,88 @@ export default function App() {
 
           {salaryBands.length === 0 && <p style={{ color: '#888', fontSize: 13 }}>업로드된 연봉밴드 데이터가 없습니다.</p>}
           {salaryBands.length > 0 && (
-            <div style={{ overflowX: 'auto' }}>
-              <table>
-                <thead>
-                  <tr><th>직급</th><th>년차</th><th>호봉</th><th>직무군</th><th>세부직무</th><th>MIN(천원)</th><th>MAX(천원)</th></tr>
-                </thead>
-                <tbody>
-                  {salaryBands.map((row) => {
-                    const minKey = row.id + 'min'
-                    const maxKey = row.id + 'max'
-                    return (
-                      <tr key={row.id}>
-                        <td>{row.grade}</td>
-                        <td>{row.year_num}년차</td>
-                        <td>{row.step}</td>
-                        <td>{row.category}</td>
-                        <td style={{ fontSize: 12, color: '#666' }}>{row.job_functions || '-'}</td>
-                        <td>
-                          <div className="salary-edit-cell">
-                            <input
-                              type="number"
-                              defaultValue={row.min_salary ?? ''}
-                              placeholder="-"
-                              style={{ width: 80 }}
-                              onChange={(ev) => setSalaryEdits((p) => ({ ...p, [minKey]: ev.target.value }))}
-                            />
-                            <button
-                              className="secondary"
-                              style={{ padding: '2px 8px', fontSize: 11 }}
-                              disabled={salaryRowSavingId === minKey}
-                              onClick={() => saveSalaryBandRow(row.id, 'min_salary', salaryEdits[minKey] ?? row.min_salary)}
-                            >
-                              {salaryRowSavingId === minKey ? '저장중' : '저장'}
-                            </button>
-                          </div>
-                        </td>
-                        <td>
-                          <div className="salary-edit-cell">
-                            <input
-                              type="number"
-                              defaultValue={row.max_salary ?? ''}
-                              placeholder="-"
-                              style={{ width: 80 }}
-                              onChange={(ev) => setSalaryEdits((p) => ({ ...p, [maxKey]: ev.target.value }))}
-                            />
-                            <button
-                              className="secondary"
-                              style={{ padding: '2px 8px', fontSize: 11 }}
-                              disabled={salaryRowSavingId === maxKey}
-                              onClick={() => saveSalaryBandRow(row.id, 'max_salary', salaryEdits[maxKey] ?? row.max_salary)}
-                            >
-                              {salaryRowSavingId === maxKey ? '저장중' : '저장'}
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
+            <div className="salary-grade-list">
+              {salaryGrid.grades.map(({ grade, years }) => {
+                const isExpanded = expandedGrades.has(grade)
+                const yearRange = years.length > 0 ? `${years[0].year_num}~${years[years.length - 1].year_num}년차` : ''
+                return (
+                  <div className="entry-card" key={grade}>
+                    <div className="entry-card-header" onClick={() => toggleGradeExpand(grade)}>
+                      <div className="entry-card-header-main">
+                        <span className="entry-card-title">{grade}</span>
+                        <span className="entry-card-meta">{yearRange}</span>
+                      </div>
+                      <span className="entry-card-toggle">{isExpanded ? '접기 ▲' : '펼치기 ▼'}</span>
+                    </div>
+                    {isExpanded && (
+                      <div style={{ overflowX: 'auto', padding: 14 }}>
+                        <table>
+                          <thead>
+                            <tr>
+                              <th>년차</th><th>호봉</th>
+                              {salaryGrid.categories.map((cat) => <th key={cat}>{cat}</th>)}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {years.map(({ year_num, cells }) => {
+                              const firstRow = [...cells.values()][0]
+                              return (
+                                <tr key={year_num}>
+                                  <td>{year_num}년차</td>
+                                  <td>{firstRow?.step ?? '-'}</td>
+                                  {salaryGrid.categories.map((cat) => {
+                                    const row = cells.get(cat)
+                                    if (!row) return <td key={cat}>-</td>
+                                    const minKey = row.id + 'min'
+                                    const maxKey = row.id + 'max'
+                                    return (
+                                      <td key={cat}>
+                                        <div className="salary-edit-cell" title={row.job_functions || ''}>
+                                          <input
+                                            type="text"
+                                            defaultValue={formatComma(row.min_salary)}
+                                            placeholder="-"
+                                            style={{ width: 72 }}
+                                            onChange={(ev) => setSalaryEdits((p) => ({ ...p, [minKey]: ev.target.value }))}
+                                            onBlur={(ev) => { ev.target.value = formatComma(parseComma(ev.target.value)) }}
+                                          />
+                                          <span>~</span>
+                                          <input
+                                            type="text"
+                                            defaultValue={formatComma(row.max_salary)}
+                                            placeholder="-"
+                                            style={{ width: 72 }}
+                                            onChange={(ev) => setSalaryEdits((p) => ({ ...p, [maxKey]: ev.target.value }))}
+                                            onBlur={(ev) => { ev.target.value = formatComma(parseComma(ev.target.value)) }}
+                                          />
+                                          <button
+                                            className="secondary"
+                                            style={{ padding: '2px 8px', fontSize: 11 }}
+                                            disabled={salaryRowSavingId === minKey || salaryRowSavingId === maxKey}
+                                            onClick={() => {
+                                              const minRaw = salaryEdits[minKey] ?? formatComma(row.min_salary)
+                                              const maxRaw = salaryEdits[maxKey] ?? formatComma(row.max_salary)
+                                              saveSalaryBandRow(row.id, 'min_salary', minRaw).then(() =>
+                                                saveSalaryBandRow(row.id, 'max_salary', maxRaw)
+                                              )
+                                            }}
+                                          >
+                                            저장
+                                          </button>
+                                        </div>
+                                      </td>
+                                    )
+                                  })}
+                                </tr>
+                              )
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
             </div>
           )}
         </div>

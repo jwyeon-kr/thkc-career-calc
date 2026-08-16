@@ -1,13 +1,11 @@
 // Vercel Serverless Function
-// 직급/연봉밴드 엑셀 업로드(파싱→저장), 조회, 재다운로드를 처리한다.
+// 직급/연봉밴드 엑셀 업로드(파싱→저장), 조회, 재다운로드, 개별 셀 수정을 처리한다.
 //
-// 파싱 방식: 고정 셀 좌표에 의존하지 않고, "구분" 열(직급명)과 "N년차" 패턴을 스캔해서
-// 직급 구간을 동적으로 인식한다. 파일 구조가 이미 한 번 바뀐 전례(시트 통합, 직무군 5→4개 재편)가
-// 있어, 향후 행 개수가 조금 바뀌어도 견딜 수 있도록 설계함. 단, 열 배치(구분/년차/호봉/연봉/
-// 직무군별 %,MIN·MAX 반복 배치)는 유지되어야 한다.
-//
-// 원본 값에 수식 계산 잔차(예: 60,004)가 섞여있어, 저장 시 100(천원) 단위로 반올림해서
-// 깔끔한 값으로 정리한다.
+// [2026-08-16 수정] 3가지 반영:
+// 1) 업로드 시 기존 데이터를 삭제하지 않고 active=false로 비활성화만 함 (소프트삭제).
+//    실수로 잘못된 파일을 올려도 Supabase에서 직접 active를 되돌려 복구 가능.
+// 2) PUT(개별 수정) 시 MIN > MAX가 되는 저장을 차단.
+// 3) PUT 수정 시 salary_band_edit_log에 이전값/이후값 기록.
 
 import { createClient } from '@supabase/supabase-js'
 import * as XLSX from 'xlsx'
@@ -27,7 +25,6 @@ function parseSalaryBandWorkbook(buffer) {
     return cellObj ? cellObj.v : null
   }
 
-  // "구분" 문자열이 있는 헤더 행을 찾는다 (열 배치 기준점)
   let headerRow = -1
   for (let r = range.s.r; r <= range.e.r; r++) {
     if (String(cell(r, 1) || '').includes('구분')) {
@@ -37,9 +34,6 @@ function parseSalaryBandWorkbook(buffer) {
   }
   if (headerRow === -1) throw new Error('헤더 행("구분")을 찾지 못했습니다. 엑셀 구조를 확인해주세요.')
 
-  // 직무군 이름은 "구분" 헤더 행보다 2행 위(본부/센터명), 1행 위(소속 세부 직무 나열)에 각각 있음.
-  // 본부명은 category로, 세부직무 나열은 job_functions로 별도 저장 — AI 자동매칭 시 세부직무까지 참고해야
-  // 정확도가 나오므로 둘 다 보존한다 (이전 버전은 본부명만 남기고 세부직무를 버려서 매칭 정확도가 낮았음).
   const categories = []
   const jobFunctionsByCategory = []
   for (let k = 0; k < NUM_CATEGORIES; k++) {
@@ -61,9 +55,6 @@ function parseSalaryBandWorkbook(buffer) {
       const yearNum = parseInt(String(yearLabel).replace('년차', ''), 10)
       const stepLabel = cell(r, 4)
       const baseSalary = cell(r, 5)
-      // 대부분 구간은 "년차당 2행"(MIN행+MAX행) 구조이지만, 이사급 등 일부 구간은 "년차당 1행"만 있는
-      // 예외 구조가 섞여 있음(원본 엑셀 자체가 그러함). 다음 행에 새 년차 라벨이 있으면(=바로 다음 년차 시작)
-      // 현재 년차는 1행짜리이므로 MIN/MAX를 억지로 만들지 않고 데이터 없음으로 처리한다.
       const nextRowYearLabel = cell(r + 1, 3)
       const hasSecondRow = !nextRowYearLabel
       const minRow = r
@@ -102,15 +93,19 @@ export default async function handler(req, res) {
   const supabase = createClient(supabaseUrl, supabaseKey)
 
   if (req.method === 'GET') {
-    // ?format=xlsx 이면 현재 저장된 데이터를 엑셀로 재구성해서 다운로드
     try {
-      const { data, error } = await supabase.from('salary_bands').select('*').order('year_num').order('category')
+      const { data, error } = await supabase
+        .from('salary_bands')
+        .select('*')
+        .eq('active', true)
+        .order('year_num')
+        .order('category')
       if (error) return res.status(500).json({ error: error.message })
 
       if (req.query.format === 'xlsx') {
-        const aoa = [['직급', '년차', '호봉', '직무군', 'MIN(천원)', 'MAX(천원)', '기준연봉(천원)']]
+        const aoa = [['직급', '년차', '호봉', '직무군', '세부직무', 'MIN(천원)', 'MAX(천원)', '기준연봉(천원)']]
         for (const row of data || []) {
-          aoa.push([row.grade, row.year_num, row.step, row.category, row.min_salary, row.max_salary, row.base_salary])
+          aoa.push([row.grade, row.year_num, row.step, row.category, row.job_functions, row.min_salary, row.max_salary, row.base_salary])
         }
         const wb = XLSX.utils.book_new()
         const ws = XLSX.utils.aoa_to_sheet(aoa)
@@ -140,14 +135,20 @@ export default async function handler(req, res) {
       const buffer = Buffer.from(fileBase64, 'base64')
       const { rows } = parseSalaryBandWorkbook(buffer)
 
-      // 기존 데이터 전부 삭제 후 새로 삽입 (스냅샷 교체 방식)
-      const { error: delErr } = await supabase.from('salary_bands').delete().neq('id', '00000000-0000-0000-0000-000000000000')
-      if (delErr) return res.status(500).json({ error: '기존 데이터 삭제 실패: ' + delErr.message })
+      // 기존 활성 데이터는 삭제하지 않고 비활성화만 함 (소프트삭제) — 실수 업로드 시 복구 가능
+      const { error: deactivateErr } = await supabase.from('salary_bands').update({ active: false }).eq('active', true)
+      if (deactivateErr) return res.status(500).json({ error: '기존 데이터 비활성화 실패: ' + deactivateErr.message })
 
-      const { error: insErr } = await supabase.from('salary_bands').insert(rows)
+      const { data: uploadRow, error: uploadInsertErr } = await supabase
+        .from('salary_band_uploads')
+        .insert({ filename: filename || null, row_count: rows.length })
+        .select()
+        .single()
+      if (uploadInsertErr) return res.status(500).json({ error: '업로드 이력 저장 실패: ' + uploadInsertErr.message })
+
+      const rowsWithBatch = rows.map((r) => ({ ...r, active: true, upload_batch_id: uploadRow.id }))
+      const { error: insErr } = await supabase.from('salary_bands').insert(rowsWithBatch)
       if (insErr) return res.status(500).json({ error: '저장 실패: ' + insErr.message })
-
-      await supabase.from('salary_band_uploads').insert({ filename: filename || null, row_count: rows.length })
 
       return res.status(200).json({ success: true, inserted: rows.length })
     } catch (err) {
@@ -158,23 +159,46 @@ export default async function handler(req, res) {
   if (req.method === 'PUT') {
     const { id, min_salary, max_salary } = req.body || {}
     if (!id) return res.status(400).json({ error: 'id가 필요합니다.' })
-    const updates = {}
-    if (min_salary !== undefined) {
-      const num = Number(min_salary)
-      if (min_salary !== null && isNaN(num)) return res.status(400).json({ error: 'min_salary는 숫자여야 합니다.' })
-      updates.min_salary = min_salary === null ? null : num
-    }
-    if (max_salary !== undefined) {
-      const num = Number(max_salary)
-      if (max_salary !== null && isNaN(num)) return res.status(400).json({ error: 'max_salary는 숫자여야 합니다.' })
-      updates.max_salary = max_salary === null ? null : num
-    }
-    if (Object.keys(updates).length === 0) {
-      return res.status(400).json({ error: '수정할 값(min_salary 또는 max_salary)이 없습니다.' })
-    }
+
     try {
+      const { data: current, error: curErr } = await supabase
+        .from('salary_bands')
+        .select('min_salary, max_salary')
+        .eq('id', id)
+        .single()
+      if (curErr) return res.status(500).json({ error: '기존 값 조회 실패: ' + curErr.message })
+
+      const updates = {}
+      const logEntries = []
+
+      if (min_salary !== undefined) {
+        const num = min_salary === null ? null : Number(min_salary)
+        if (min_salary !== null && isNaN(num)) return res.status(400).json({ error: 'min_salary는 숫자여야 합니다.' })
+        updates.min_salary = num
+        logEntries.push({ band_id: id, field: 'min_salary', old_value: current.min_salary, new_value: num })
+      }
+      if (max_salary !== undefined) {
+        const num = max_salary === null ? null : Number(max_salary)
+        if (max_salary !== null && isNaN(num)) return res.status(400).json({ error: 'max_salary는 숫자여야 합니다.' })
+        updates.max_salary = num
+        logEntries.push({ band_id: id, field: 'max_salary', old_value: current.max_salary, new_value: num })
+      }
+      if (Object.keys(updates).length === 0) {
+        return res.status(400).json({ error: '수정할 값(min_salary 또는 max_salary)이 없습니다.' })
+      }
+
+      // MIN > MAX가 되는 저장 차단 (수정 후 최종값 기준으로 검증)
+      const finalMin = updates.min_salary !== undefined ? updates.min_salary : current.min_salary
+      const finalMax = updates.max_salary !== undefined ? updates.max_salary : current.max_salary
+      if (finalMin != null && finalMax != null && Number(finalMin) > Number(finalMax)) {
+        return res.status(400).json({ error: `MIN(${finalMin})이 MAX(${finalMax})보다 클 수 없습니다.` })
+      }
+
       const { error } = await supabase.from('salary_bands').update(updates).eq('id', id)
       if (error) return res.status(500).json({ error: '수정 실패: ' + error.message })
+
+      await supabase.from('salary_band_edit_log').insert(logEntries)
+
       return res.status(200).json({ success: true })
     } catch (err) {
       return res.status(500).json({ error: '수정 중 오류: ' + err.message })

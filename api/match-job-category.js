@@ -26,7 +26,7 @@ export default async function handler(req, res) {
   const supabase = createClient(supabaseUrl, supabaseKey)
 
   try {
-    const { data, error } = await supabase.from('salary_bands').select('category, job_functions')
+    const { data, error } = await supabase.from('salary_bands').select('category, job_functions').eq('active', true)
     if (error) return res.status(500).json({ error: '직무군 목록 조회 실패: ' + error.message })
 
     // 본부명(category)별 세부직무(job_functions)를 중복 없이 매핑 — AI 매칭 정확도를 위해 세부직무까지 함께 프롬프트에 반영

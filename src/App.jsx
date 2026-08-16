@@ -158,9 +158,12 @@ export default function App() {
   const [salaryEdits, setSalaryEdits] = useState({})
   const [salaryRowSavingId, setSalaryRowSavingId] = useState('')
   const [expandedGrades, setExpandedGrades] = useState(new Set())
+  const [certifications, setCertifications] = useState([])
   const [matchedCategory, setMatchedCategory] = useState(null)
   const [categoryMatching, setCategoryMatching] = useState(false)
   const [salaryBandResult, setSalaryBandResult] = useState(null)
+  const [report, setReport] = useState('')
+  const [reportGenerating, setReportGenerating] = useState(false)
 
   const resultRef = useRef(null)
   const fileInputRef = useRef(null)
@@ -450,6 +453,7 @@ export default function App() {
         return
       }
       if (data.applicant_name) setApplicantName(data.applicant_name)
+      setCertifications(Array.isArray(data.certifications) ? data.certifications : [])
       const extracted = (data.career_entries || []).map((c) => ({
         ...newEntry(),
         company_name: c.company_name || '',
@@ -556,6 +560,7 @@ export default function App() {
     setResult(r)
     setSalaryBandResult(null)
     setMatchedCategory(null)
+    setReport('')
 
     if (targetJob.trim() && salaryBands.length > 0) {
       setCategoryMatching(true)
@@ -579,6 +584,34 @@ export default function App() {
     }
   }
 
+  async function generateReport() {
+    if (!result) return
+    setReportGenerating(true)
+    setReport('')
+    try {
+      const res = await fetch('/api/generate-report', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          applicantName,
+          targetJob,
+          roundedYears: result.roundedYears,
+          totalYears: result.totalYears,
+          perEntry: result.perEntry,
+          matchedCategory,
+          salaryBandResult,
+        }),
+      })
+      const data = await safeJson(res)
+      if (data.error) throw new Error(data.error)
+      setReport(data.report || '')
+    } catch (err) {
+      setReport('리포트 생성 실패: ' + err.message)
+    } finally {
+      setReportGenerating(false)
+    }
+  }
+
   async function saveResult() {
     if (!result || !applicantName) {
       alert('지원자명을 입력하고 계산을 먼저 실행해주세요.')
@@ -587,7 +620,7 @@ export default function App() {
     setSaving(true)
     setSaveMsg('')
     try {
-      const resultWithSalary = { ...result, matchedCategory, salaryBandResult }
+      const resultWithSalary = { ...result, matchedCategory, salaryBandResult, report }
       const res = await fetch('/api/applicants', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -828,6 +861,11 @@ export default function App() {
                 <input value={targetJob} onChange={(e) => setTargetJob(e.target.value)} />
               </div>
             </div>
+            {certifications.length > 0 && (
+              <p style={{ fontSize: 12, color: '#666', marginTop: 8 }}>
+                📋 이력서상 자격증: {certifications.join(', ')} (참고정보 — 돌봄도메인 특례 등 판단 시 참고, 자동반영 아님)
+              </p>
+            )}
           </div>
 
           <div className="card">
@@ -1074,6 +1112,7 @@ export default function App() {
             <h2>3. 계산 결과</h2>
             <div className="btn-row" style={{ marginTop: 0, marginBottom: 14 }}>
               <button onClick={runCalculation} disabled={!config}>계산하기</button>
+              {result && <button className="secondary" onClick={generateReport} disabled={reportGenerating}>{reportGenerating ? '리포트 생성 중...' : '설명 리포트 생성'}</button>}
               {result && <button className="secondary" onClick={exportPdf}>PDF 내보내기</button>}
               {result && <button className="secondary" onClick={saveResult} disabled={saving}>{saving ? '저장 중...' : '저장'}</button>}
             </div>
@@ -1126,6 +1165,13 @@ export default function App() {
                     ))}
                   </tbody>
                 </table>
+
+                {report && (
+                  <div className="report-box" style={{ marginTop: 14, padding: 12, background: '#f7f8fa', borderRadius: 6, fontSize: 13, lineHeight: 1.6, whiteSpace: 'pre-line' }}>
+                    <div style={{ fontWeight: 700, marginBottom: 6 }}>설명 리포트</div>
+                    {report}
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -1198,6 +1244,12 @@ export default function App() {
                           {isExpanded && snapshot && (
                             <tr>
                               <td colSpan={7} style={{ background: '#fafafa', padding: 14 }}>
+                                {snapshot.report && (
+                                  <div style={{ marginBottom: 14, padding: 12, background: '#fff', borderRadius: 6, fontSize: 13, lineHeight: 1.6, whiteSpace: 'pre-line', border: '1px solid #eee' }}>
+                                    <div style={{ fontWeight: 700, marginBottom: 6 }}>설명 리포트</div>
+                                    {snapshot.report}
+                                  </div>
+                                )}
                                 {(snapshot.perEntry || []).map((entry) => (
                                   <HistoryEntryDetail key={entry.id} entry={entry} />
                                 ))}

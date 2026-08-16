@@ -8,6 +8,9 @@
 // 기존에는 "job_title" 하나에 부서+직무가 뭉쳐서 들어가는 문제가 있었음(예: "재무회계팀.회계").
 // company_name, department, job_title 3개 필드로 명확히 분리하고,
 // 분리가 애매한 경우 raw_position_text(원문)를 항상 함께 반환해 저장 단계에서 fallback으로 쓸 수 있게 함.
+//
+// [2026-08-16 수정] 이력서에 기재된 자격증(요양보호사, 사회복지사 등)을 certifications 배열로 함께 추출.
+// DB에 저장하지 않고 화면 참고정보로만 사용 — 돌봄도메인 특례 체크 여부 판단 시 담당자가 참고할 힌트.
 
 import { createClient } from '@supabase/supabase-js'
 
@@ -56,6 +59,7 @@ export default async function handler(req, res) {
 
 {
   "applicant_name": "지원자 이름 (확인 불가시 빈 문자열)",
+  "certifications": ["이력서에 기재된 자격증/면허명 목록 (예: '요양보호사 2급', '사회복지사 1급'). 없으면 빈 배열"],
   "career_entries": [
     {
       "company_name": "회사명만 (부서/직무 절대 포함하지 말 것, 예: '프레스티지바이오파마아이디씨㈜')",

@@ -636,6 +636,20 @@ export default function App() {
 
       setSaveMsg('저장 완료되었습니다.')
       loadHistory()
+
+      // 저장 완료 후 알림 메일 발송 시도 (실패해도 저장 자체 결과에는 영향 없음)
+      fetch('/api/send-notification', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          applicantName,
+          targetJob,
+          roundedYears: result.roundedYears,
+          totalYears: result.totalYears,
+          matchedCategory,
+          salaryBandResult,
+        }),
+      }).catch(() => {})
     } catch (err) {
       setSaveMsg('저장 실패: ' + err.message)
     } finally {

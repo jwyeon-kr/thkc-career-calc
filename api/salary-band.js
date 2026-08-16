@@ -52,7 +52,7 @@ function parseSalaryBandWorkbook(buffer) {
 
   const rows = []
   let currentGrade = null
-  let r = headerRow + 3 // "구분" 행 다음 MIN/MAX 라벨 2행을 건너뛰고 데이터 시작
+  let r = headerRow + 3
   while (r <= range.e.r) {
     const gradeCell = cell(r, 1)
     if (gradeCell) currentGrade = String(gradeCell).replace(/\s+/g, ' ').trim()
@@ -61,12 +61,17 @@ function parseSalaryBandWorkbook(buffer) {
       const yearNum = parseInt(String(yearLabel).replace('년차', ''), 10)
       const stepLabel = cell(r, 4)
       const baseSalary = cell(r, 5)
+      // 대부분 구간은 "년차당 2행"(MIN행+MAX행) 구조이지만, 이사급 등 일부 구간은 "년차당 1행"만 있는
+      // 예외 구조가 섞여 있음(원본 엑셀 자체가 그러함). 다음 행에 새 년차 라벨이 있으면(=바로 다음 년차 시작)
+      // 현재 년차는 1행짜리이므로 MIN/MAX를 억지로 만들지 않고 데이터 없음으로 처리한다.
+      const nextRowYearLabel = cell(r + 1, 3)
+      const hasSecondRow = !nextRowYearLabel
       const minRow = r
-      const maxRow = r + 1
+      const maxRow = hasSecondRow ? r + 1 : null
       for (let k = 0; k < NUM_CATEGORIES; k++) {
         const col = JOB_CATEGORY_START_COL + k * 2 + 1
         const minVal = cell(minRow, col)
-        const maxVal = cell(maxRow, col)
+        const maxVal = maxRow != null ? cell(maxRow, col) : null
         rows.push({
           grade: currentGrade,
           year_num: yearNum,
@@ -78,7 +83,7 @@ function parseSalaryBandWorkbook(buffer) {
           base_salary: baseSalary != null && !isNaN(baseSalary) ? Number(baseSalary) : null,
         })
       }
-      r += 2
+      r += hasSecondRow ? 2 : 1
     } else {
       r += 1
     }
@@ -150,5 +155,31 @@ export default async function handler(req, res) {
     }
   }
 
-  return res.status(405).json({ error: 'GET 또는 POST만 허용됩니다.' })
+  if (req.method === 'PUT') {
+    const { id, min_salary, max_salary } = req.body || {}
+    if (!id) return res.status(400).json({ error: 'id가 필요합니다.' })
+    const updates = {}
+    if (min_salary !== undefined) {
+      const num = Number(min_salary)
+      if (min_salary !== null && isNaN(num)) return res.status(400).json({ error: 'min_salary는 숫자여야 합니다.' })
+      updates.min_salary = min_salary === null ? null : num
+    }
+    if (max_salary !== undefined) {
+      const num = Number(max_salary)
+      if (max_salary !== null && isNaN(num)) return res.status(400).json({ error: 'max_salary는 숫자여야 합니다.' })
+      updates.max_salary = max_salary === null ? null : num
+    }
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ error: '수정할 값(min_salary 또는 max_salary)이 없습니다.' })
+    }
+    try {
+      const { error } = await supabase.from('salary_bands').update(updates).eq('id', id)
+      if (error) return res.status(500).json({ error: '수정 실패: ' + error.message })
+      return res.status(200).json({ success: true })
+    } catch (err) {
+      return res.status(500).json({ error: '수정 중 오류: ' + err.message })
+    }
+  }
+
+  return res.status(405).json({ error: 'GET, POST, PUT만 허용됩니다.' })
 }

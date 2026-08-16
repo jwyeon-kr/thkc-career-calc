@@ -120,6 +120,8 @@ export default function App() {
   const [salaryLastUpload, setSalaryLastUpload] = useState(null)
   const [salaryUploading, setSalaryUploading] = useState(false)
   const [salaryMsg, setSalaryMsg] = useState('')
+  const [salaryEdits, setSalaryEdits] = useState({})
+  const [salaryRowSavingId, setSalaryRowSavingId] = useState('')
   const [matchedCategory, setMatchedCategory] = useState(null)
   const [categoryMatching, setCategoryMatching] = useState(false)
   const [salaryBandResult, setSalaryBandResult] = useState(null)
@@ -189,6 +191,31 @@ export default function App() {
 
   function downloadSalaryXlsx() {
     window.open('/api/salary-band?format=xlsx', '_blank')
+  }
+
+  async function saveSalaryBandRow(id, field, value) {
+    const num = Number(value)
+    if (isNaN(num)) {
+      setSalaryMsg('숫자만 입력 가능합니다.')
+      return
+    }
+    setSalaryRowSavingId(id + field)
+    setSalaryMsg('')
+    try {
+      const res = await fetch('/api/salary-band', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id, [field]: num }),
+      })
+      const data = await safeJson(res)
+      if (data.error) throw new Error(data.error)
+      setSalaryMsg('저장되었습니다.')
+      loadSalaryBands()
+    } catch (err) {
+      setSalaryMsg('저장 실패: ' + err.message)
+    } finally {
+      setSalaryRowSavingId('')
+    }
   }
 
   function updateEntry(id, field, value) {
@@ -1161,19 +1188,60 @@ export default function App() {
             <div style={{ overflowX: 'auto' }}>
               <table>
                 <thead>
-                  <tr><th>직급</th><th>년차</th><th>호봉</th><th>직무군</th><th>MIN(천원)</th><th>MAX(천원)</th></tr>
+                  <tr><th>직급</th><th>년차</th><th>호봉</th><th>직무군</th><th>세부직무</th><th>MIN(천원)</th><th>MAX(천원)</th></tr>
                 </thead>
                 <tbody>
-                  {salaryBands.map((row) => (
-                    <tr key={row.id}>
-                      <td>{row.grade}</td>
-                      <td>{row.year_num}년차</td>
-                      <td>{row.step}</td>
-                      <td>{row.category}</td>
-                      <td>{row.min_salary != null ? row.min_salary.toLocaleString('ko-KR') : '-'}</td>
-                      <td>{row.max_salary != null ? row.max_salary.toLocaleString('ko-KR') : '-'}</td>
-                    </tr>
-                  ))}
+                  {salaryBands.map((row) => {
+                    const minKey = row.id + 'min'
+                    const maxKey = row.id + 'max'
+                    return (
+                      <tr key={row.id}>
+                        <td>{row.grade}</td>
+                        <td>{row.year_num}년차</td>
+                        <td>{row.step}</td>
+                        <td>{row.category}</td>
+                        <td style={{ fontSize: 12, color: '#666' }}>{row.job_functions || '-'}</td>
+                        <td>
+                          <div className="salary-edit-cell">
+                            <input
+                              type="number"
+                              defaultValue={row.min_salary ?? ''}
+                              placeholder="-"
+                              style={{ width: 80 }}
+                              onChange={(ev) => setSalaryEdits((p) => ({ ...p, [minKey]: ev.target.value }))}
+                            />
+                            <button
+                              className="secondary"
+                              style={{ padding: '2px 8px', fontSize: 11 }}
+                              disabled={salaryRowSavingId === minKey}
+                              onClick={() => saveSalaryBandRow(row.id, 'min_salary', salaryEdits[minKey] ?? row.min_salary)}
+                            >
+                              {salaryRowSavingId === minKey ? '저장중' : '저장'}
+                            </button>
+                          </div>
+                        </td>
+                        <td>
+                          <div className="salary-edit-cell">
+                            <input
+                              type="number"
+                              defaultValue={row.max_salary ?? ''}
+                              placeholder="-"
+                              style={{ width: 80 }}
+                              onChange={(ev) => setSalaryEdits((p) => ({ ...p, [maxKey]: ev.target.value }))}
+                            />
+                            <button
+                              className="secondary"
+                              style={{ padding: '2px 8px', fontSize: 11 }}
+                              disabled={salaryRowSavingId === maxKey}
+                              onClick={() => saveSalaryBandRow(row.id, 'max_salary', salaryEdits[maxKey] ?? row.max_salary)}
+                            >
+                              {salaryRowSavingId === maxKey ? '저장중' : '저장'}
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    )
+                  })}
                 </tbody>
               </table>
             </div>

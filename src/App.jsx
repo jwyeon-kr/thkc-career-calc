@@ -1041,6 +1041,9 @@ export default function App() {
                             <input type="checkbox" checked={e.listed_bonus_confirmed} onChange={(ev) => updateEntry(e.id, 'listed_bonus_confirmed', ev.target.checked)} disabled={!e.listed_bonus_eligible_job} />
                             <span>담당자 최종 확인</span>
                           </label>
+                          <div className="entry-field-hint">
+                            회사가 상장사인지가 아니라, 이 경력자가 재무회계·IR·감사대응 등 공시 관련 업무를 실제로 수행했는지를 확인해주세요. 같은 회사여도 담당 업무가 아니면 체크하지 마세요.
+                          </div>
                         </div>
 
                         <div className="entry-field-full entry-card-footer">

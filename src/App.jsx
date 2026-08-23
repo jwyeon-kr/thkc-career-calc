@@ -522,6 +522,7 @@ export default function App() {
     if (item.entries.length > 0) {
       setEntries(item.entries)
       setExpandedIds(new Set())
+      autoLookupEntries(item.entries)
     }
     setTab('manual')
     setUploadQueue((prev) => prev.map((q) => (q.id === queueId ? { ...q, status: 'opened' } : q)))
@@ -553,6 +554,7 @@ export default function App() {
         if (result.entries.length > 0) {
           setEntries(result.entries)
           setExpandedIds(new Set())
+          autoLookupEntries(result.entries) // 회사명이 있는 건마다 DART 조회를 순차 자동 실행 (백그라운드, 업로드 완료를 막지 않음)
         }
         setTab('manual')
       } catch (err) {
@@ -592,6 +594,72 @@ export default function App() {
     }
   }
 
+  // DART 조회 응답(data)을 entry에 적용할 필드 업데이트 객체로 변환한다 — React 상태를 건드리지 않는 순수 함수.
+  // 버튼 클릭(lookupRevenue)과 이력서 스캔 직후 자동조회(autoLookupEntries) 양쪽에서 공용으로 쓴다.
+  function buildDartUpdates(data) {
+    if (data.error) {
+      return { revenue_lookup_status: 'failed', revenue_lookup_message: data.error }
+    }
+    if (data.ambiguous) {
+      return { revenue_lookup_status: 'ambiguous', revenue_lookup_candidates: data.candidates, revenue_lookup_message: data.reason }
+    }
+    if (!data.found || !data.revenue_found) {
+      const updates = {
+        revenue_lookup_status: 'failed',
+        revenue_lookup_message: data.reason || '조회 결과가 없습니다.',
+      }
+      if (data.is_listed !== undefined) updates.is_listed_hint = data.is_listed
+      if (data.market !== undefined) updates.market_hint = data.market
+      if (data.established_date !== undefined) updates.established_hint = data.established_date
+      if (data.audit_report) {
+        updates.audit_report_url = data.audit_report.url
+        updates.audit_report_label = `${data.audit_report.report_nm} (${data.audit_report.rcept_dt} 제출)`
+      }
+      if (data.audit_extract_experimental) {
+        const ex = data.audit_extract_experimental
+        // 감사보고서 실험적 추출값도 사업보고서 케이스와 동일한 판정 로직을 태워 드롭다운까지 채운다.
+        // 다만 출처(revenue_source)를 'auto-experimental'로 별도 표시해 화면에서 구분되게 한다 —
+        // 저장 전까지는 어차피 담당자가 모두 눈으로 검토하는 구조라, 안 채우는 것보다 "강한 경고 + 제안값"이 더 실용적.
+        const auto = determineScaleAuto({ revenueWon: ex.revenue, assetWon: ex.asset, industryMatch: data.industry_threshold })
+        const bracket = auto.bracket || (ex.revenue != null ? mapRevenueToBracket(ex.revenue) : '')
+        if (bracket) {
+          updates.revenue_bracket = bracket
+          updates.revenue_source = 'auto-experimental'
+        }
+        const parts = [
+          ex.revenue != null ? `매출 ${formatWonToEok(ex.revenue)}원` : null,
+          ex.asset != null ? `자산총액 ${formatWonToEok(ex.asset)}원` : null,
+          auto.reason,
+        ].filter(Boolean)
+        updates.audit_extract_hint = `⚠ 실험적 자동추출 기반(원문 대조 필수): ${parts.join(', ')}`
+      }
+      return updates
+    }
+
+    const auto = determineScaleAuto({
+      revenueWon: data.revenue_amount,
+      assetWon: data.asset_amount,
+      industryMatch: data.industry_threshold,
+    })
+    // 업종 기반 자동판정이 안 될 때만(업종 미확인 등) 매출액 단일 임계값 간이추정으로 대체
+    const bracket = auto.bracket || mapRevenueToBracket(data.revenue_amount)
+    const rawParts = [
+      `매출 ${formatWonToEok(data.revenue_amount)}원 (DART, ${data.revenue_year}년 사업보고서 기준)`,
+      data.asset_amount != null ? `자산총액 ${formatWonToEok(data.asset_amount)}원` : null,
+      auto.reason,
+    ].filter(Boolean)
+    return {
+      revenue_bracket: bracket,
+      revenue_source: 'auto',
+      revenue_raw_value: rawParts.join(' · '),
+      is_listed_hint: data.is_listed,
+      market_hint: data.market,
+      established_hint: data.established_date,
+      revenue_lookup_status: 'success',
+      revenue_lookup_candidates: [],
+    }
+  }
+
   async function lookupRevenue(entryId, corpCode) {
     const entry = entries.find((e) => e.id === entryId)
     if (!entry.company_name?.trim()) {
@@ -606,72 +674,31 @@ export default function App() {
         : `company=${encodeURIComponent(entry.company_name)}`
       const res = await fetch(`/api/dart-lookup?${params}`)
       const data = await safeJson(res)
-
-      if (data.error) {
-        updateEntry(entryId, 'revenue_lookup_status', 'failed')
-        updateEntry(entryId, 'revenue_lookup_message', data.error)
-        return
-      }
-      if (data.ambiguous) {
-        updateEntry(entryId, 'revenue_lookup_status', 'ambiguous')
-        updateEntry(entryId, 'revenue_lookup_candidates', data.candidates)
-        updateEntry(entryId, 'revenue_lookup_message', data.reason)
-        return
-      }
-      if (!data.found || !data.revenue_found) {
-        updateEntry(entryId, 'revenue_lookup_status', 'failed')
-        updateEntry(entryId, 'revenue_lookup_message', data.reason || '조회 결과가 없습니다.')
-        if (data.is_listed !== undefined) updateEntry(entryId, 'is_listed_hint', data.is_listed)
-        if (data.market !== undefined) updateEntry(entryId, 'market_hint', data.market)
-        if (data.established_date !== undefined) updateEntry(entryId, 'established_hint', data.established_date)
-        if (data.audit_report) {
-          updateEntry(entryId, 'audit_report_url', data.audit_report.url)
-          updateEntry(entryId, 'audit_report_label', `${data.audit_report.report_nm} (${data.audit_report.rcept_dt} 제출)`)
-        }
-        if (data.audit_extract_experimental) {
-          const ex = data.audit_extract_experimental
-          // 감사보고서 실험적 추출값도 사업보고서 케이스와 동일한 판정 로직을 태워 드롭다운까지 채운다.
-          // 다만 출처(revenue_source)를 'auto-experimental'로 별도 표시해 화면에서 구분되게 한다 —
-          // 저장 전까지는 어차피 담당자가 모두 눈으로 검토하는 구조라, 안 채우는 것보다 "강한 경고 + 제안값"이 더 실용적.
-          const auto = determineScaleAuto({ revenueWon: ex.revenue, assetWon: ex.asset, industryMatch: data.industry_threshold })
-          const bracket = auto.bracket || (ex.revenue != null ? mapRevenueToBracket(ex.revenue) : '')
-          if (bracket) {
-            updateEntry(entryId, 'revenue_bracket', bracket)
-            updateEntry(entryId, 'revenue_source', 'auto-experimental')
-          }
-          const parts = [
-            ex.revenue != null ? `매출 ${formatWonToEok(ex.revenue)}원` : null,
-            ex.asset != null ? `자산총액 ${formatWonToEok(ex.asset)}원` : null,
-            auto.reason,
-          ].filter(Boolean)
-          updateEntry(entryId, 'audit_extract_hint', `⚠ 실험적 자동추출 기반(원문 대조 필수): ${parts.join(', ')}`)
-        }
-        return
-      }
-
-      const auto = determineScaleAuto({
-        revenueWon: data.revenue_amount,
-        assetWon: data.asset_amount,
-        industryMatch: data.industry_threshold,
-      })
-      // 업종 기반 자동판정이 안 될 때만(업종 미확인 등) 매출액 단일 임계값 간이추정으로 대체
-      const bracket = auto.bracket || mapRevenueToBracket(data.revenue_amount)
-      updateEntry(entryId, 'revenue_bracket', bracket)
-      updateEntry(entryId, 'revenue_source', 'auto')
-      const rawParts = [
-        `매출 ${formatWonToEok(data.revenue_amount)}원 (DART, ${data.revenue_year}년 사업보고서 기준)`,
-        data.asset_amount != null ? `자산총액 ${formatWonToEok(data.asset_amount)}원` : null,
-        auto.reason,
-      ].filter(Boolean)
-      updateEntry(entryId, 'revenue_raw_value', rawParts.join(' · '))
-      updateEntry(entryId, 'is_listed_hint', data.is_listed)
-      updateEntry(entryId, 'market_hint', data.market)
-      updateEntry(entryId, 'established_hint', data.established_date)
-      updateEntry(entryId, 'revenue_lookup_status', 'success')
-      updateEntry(entryId, 'revenue_lookup_candidates', [])
+      const updates = buildDartUpdates(data)
+      for (const [field, value] of Object.entries(updates)) updateEntry(entryId, field, value)
     } catch (err) {
       updateEntry(entryId, 'revenue_lookup_status', 'failed')
       updateEntry(entryId, 'revenue_lookup_message', '조회 중 오류: ' + err.message)
+    }
+  }
+
+  // [2026-08-23 추가] 이력서 스캔 직후, 회사명이 있는 경력 건마다 "DART 조회" 버튼을 담당자 대신
+  // 순차적으로 눌러준다. 데이터 출처는 여전히 실제 DART 조회(또는 감사보고서 fallback)이므로
+  // 신뢰성 저하 없이 체감 자동화만 높이는 것 — Claude가 회사 규모를 추측하는 것과는 다르다.
+  // 여러 건을 병렬로 쏘지 않고 순차 처리하는 이유는 배치 이력서 업로드와 동일: DART API 부하/레이트리밋 회피.
+  async function autoLookupEntries(entryList) {
+    for (const entry of entryList) {
+      if (!entry.company_name?.trim()) continue
+      updateEntry(entry.id, 'revenue_lookup_status', 'loading')
+      try {
+        const res = await fetch(`/api/dart-lookup?company=${encodeURIComponent(entry.company_name)}`)
+        const data = await safeJson(res)
+        const updates = buildDartUpdates(data)
+        for (const [field, value] of Object.entries(updates)) updateEntry(entry.id, field, value)
+      } catch (err) {
+        updateEntry(entry.id, 'revenue_lookup_status', 'failed')
+        updateEntry(entry.id, 'revenue_lookup_message', '조회 중 오류: ' + err.message)
+      }
     }
   }
 
@@ -1047,7 +1074,7 @@ export default function App() {
               </div>
             </div>
 
-            <p className="upload-first-hint">📄 지원팀/직무부터 입력한 뒤 이력서를 업로드해주세요 — 직무매칭까지 한 번에 자동 제안됩니다. (여러 명을 한 번에 처리하려면 파일을 여러 개 선택하세요)</p>
+            <p className="upload-first-hint">📄 지원팀/직무부터 입력한 뒤 이력서를 업로드해주세요 — 직무매칭 자동 제안 + 경력별 DART 기업정보(기업규모/상장여부) 자동조회까지 한 번에 처리됩니다. (여러 명을 한 번에 처리하려면 파일을 여러 개 선택하세요)</p>
 
             <div className="tab-group">
               <button className={tab === 'upload' ? 'active' : ''} onClick={() => setTab('upload')}>이력서 업로드</button>

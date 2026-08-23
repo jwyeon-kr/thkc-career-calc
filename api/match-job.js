@@ -2,6 +2,8 @@
 // 정형 입력(수동 입력) 화면에서, 입력한 직무명과 지원직무를 비교하여
 // 직무매칭(동일/유사/기타)을 AI가 제안한다. 최종 판단은 담당자가 확인 후 수정.
 
+import { callAnthropic } from '../shared/anthropic.js'
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'POST만 허용됩니다.' })
@@ -23,19 +25,10 @@ export default async function handler(req, res) {
 - "기타": 관련성이 낮은 다른 직무`
 
   try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': process.env.ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-5',
-        max_tokens: 100,
-        system: systemPrompt,
-        messages: [{ role: 'user', content: `지원 직무: ${targetJob}\n경력상 직무: ${jobTitle}` }],
-      }),
+    const response = await callAnthropic({
+      system: systemPrompt,
+      maxTokens: 100,
+      messages: [{ role: 'user', content: `지원 직무: ${targetJob}\n경력상 직무: ${jobTitle}` }],
     })
     if (!response.ok) {
       const errText = await response.text()

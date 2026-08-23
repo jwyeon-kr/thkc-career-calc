@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { loadWeightConfig, calcAll } from './lib/calculator'
-import { mapRevenueToBracket, formatWonToEok } from '../shared/revenueBracket'
+import { mapRevenueToBracket, determineScaleAuto, formatWonToEok } from '../shared/revenueBracket'
 import { suggestListedBonusEligible } from '../shared/listedBonusJobs'
 import html2canvas from 'html2canvas'
 import jsPDF from 'jspdf'
@@ -165,9 +165,22 @@ export default function App() {
   const [report, setReport] = useState('')
   const [reportGenerating, setReportGenerating] = useState(false)
 
+  // [2026-08-23 추가] 감사추적(담당자명)/재계산/배치업로드/경영대시보드
+  const [savedBy, setSavedBy] = useState(() => {
+    try { return localStorage.getItem('thkc_saved_by') || '' } catch { return '' }
+  })
+  const [editingApplicantId, setEditingApplicantId] = useState(null)
+  const [uploadQueue, setUploadQueue] = useState([])
+  const [dashboardHistory, setDashboardHistory] = useState([])
+  const [dashboardLoading, setDashboardLoading] = useState(false)
+
   const resultRef = useRef(null)
   const fileInputRef = useRef(null)
   const salaryFileInputRef = useRef(null)
+
+  useEffect(() => {
+    try { localStorage.setItem('thkc_saved_by', savedBy) } catch { /* 저장소 접근 불가 시 조용히 무시 */ }
+  }, [savedBy])
 
   useEffect(() => {
     loadWeightConfig().then((c) => {
@@ -189,6 +202,19 @@ export default function App() {
       setHistory(data.history || [])
     } catch {
       setHistory([])
+    }
+  }
+
+  async function loadDashboard() {
+    setDashboardLoading(true)
+    try {
+      const res = await fetch('/api/applicants?limit=500')
+      const data = await safeJson(res)
+      setDashboardHistory(data.history || [])
+    } catch {
+      setDashboardHistory([])
+    } finally {
+      setDashboardLoading(false)
     }
   }
 
@@ -343,13 +369,14 @@ export default function App() {
 
   async function deleteSelectedHistory() {
     if (selectedHistoryIds.size === 0) return
-    if (!confirm(`선택한 ${selectedHistoryIds.size}건을 삭제하시겠습니까? 되돌릴 수 없습니다.`)) return
+    const reason = prompt(`선택한 ${selectedHistoryIds.size}건을 삭제합니다. 삭제 사유를 입력해주세요 (감사기록용으로 남습니다).`)
+    if (reason === null) return // 취소
     setHistoryDeleting(true)
     try {
       const res = await fetch('/api/applicants', {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ calculationResultIds: [...selectedHistoryIds] }),
+        body: JSON.stringify({ calculationResultIds: [...selectedHistoryIds], deletedBy: savedBy || null, reason }),
       })
       const data = await safeJson(res)
       if (data.error) throw new Error(data.error)
@@ -413,67 +440,112 @@ export default function App() {
     })
   }
 
-  async function handleFileUpload(e) {
-    const file = e.target.files[0]
-    if (!file) return
-    setUploading(true)
-    try {
-      const urlRes = await fetch('/api/get-upload-url', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ filename: file.name }),
-      })
-      const urlData = await safeJson(urlRes)
-      if (urlData.error) {
-        alert('업로드 준비 실패: ' + urlData.error + '\n정형 입력으로 직접 입력해주세요.')
-        setTab('manual')
-        return
-      }
+  // 이력서 1건을 업로드+추출만 하고, 결과를 화면 상태에 반영하지 않고 그대로 반환한다.
+  // (단일 업로드/배치 업로드 양쪽에서 공용으로 씀)
+  async function processResumeFile(file, targetJobHint) {
+    const urlRes = await fetch('/api/get-upload-url', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filename: file.name }),
+    })
+    const urlData = await safeJson(urlRes)
+    if (urlData.error) throw new Error('업로드 준비 실패: ' + urlData.error)
 
-      const putRes = await fetch(urlData.signedUrl, {
-        method: 'PUT',
-        headers: { 'Content-Type': file.type || 'application/octet-stream' },
-        body: file,
-      })
-      if (!putRes.ok) {
-        alert('파일 업로드 실패 (파일이 너무 크거나 네트워크 문제일 수 있습니다). 정형 입력으로 직접 입력해주세요.')
-        setTab('manual')
-        return
-      }
+    const putRes = await fetch(urlData.signedUrl, {
+      method: 'PUT',
+      headers: { 'Content-Type': file.type || 'application/octet-stream' },
+      body: file,
+    })
+    if (!putRes.ok) throw new Error('파일 업로드 실패 (파일이 너무 크거나 네트워크 문제일 수 있습니다)')
 
-      const res = await fetch('/api/extract', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ storagePath: urlData.path, mediaType: file.type, targetJob }),
-      })
-      const data = await safeJson(res)
-      if (data.error) {
-        alert('추출 실패: ' + data.error + '\n정형 입력으로 직접 입력해주세요.')
-        setTab('manual')
-        return
-      }
-      if (data.applicant_name) setApplicantName(data.applicant_name)
-      setCertifications(Array.isArray(data.certifications) ? data.certifications : [])
-      const extracted = (data.career_entries || []).map((c) => ({
-        ...newEntry(),
-        company_name: c.company_name || '',
-        start_date: c.start_date || '',
-        end_date: c.end_date || '',
-        employment_type: EMPLOYMENT_TYPES.includes(c.employment_type_guess) ? c.employment_type_guess : '정규직',
-        job_match: MATCH_LEVELS.includes(c.job_match_suggestion) ? c.job_match_suggestion : '',
-        job_title: c.job_title || '',
-        listed_bonus_eligible_job: suggestListedBonusEligible(c.job_title || ''),
-      }))
-      if (extracted.length > 0) {
-        setEntries(extracted)
-        setExpandedIds(new Set())
-      }
-      setTab('manual')
-    } catch (err) {
-      alert('업로드 처리 중 오류: ' + err.message)
-    } finally {
-      setUploading(false)
+    const res = await fetch('/api/extract', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ storagePath: urlData.path, mediaType: file.type, targetJob: targetJobHint }),
+    })
+    const data = await safeJson(res)
+    if (data.error) throw new Error('추출 실패: ' + data.error)
+
+    const entries = (data.career_entries || []).map((c) => ({
+      ...newEntry(),
+      company_name: c.company_name || '',
+      start_date: c.start_date || '',
+      end_date: c.end_date || '',
+      employment_type: EMPLOYMENT_TYPES.includes(c.employment_type_guess) ? c.employment_type_guess : '정규직',
+      job_match: MATCH_LEVELS.includes(c.job_match_suggestion) ? c.job_match_suggestion : '',
+      job_title: c.job_title || '',
+      listed_bonus_eligible_job: suggestListedBonusEligible(c.job_title || ''),
+    }))
+    return {
+      applicantName: data.applicant_name || '',
+      certifications: Array.isArray(data.certifications) ? data.certifications : [],
+      entries,
     }
+  }
+
+  // 배치 업로드 대기열에서 처리 완료된 항목을 현재 계산 화면으로 불러온다.
+  function openQueueItem(queueId) {
+    const item = uploadQueue.find((q) => q.id === queueId)
+    if (!item || item.status !== 'ready') return
+    startNewApplicant()
+    if (item.applicantName) setApplicantName(item.applicantName)
+    setCertifications(item.certifications)
+    if (item.entries.length > 0) {
+      setEntries(item.entries)
+      setExpandedIds(new Set())
+    }
+    setTab('manual')
+    setUploadQueue((prev) => prev.map((q) => (q.id === queueId ? { ...q, status: 'opened' } : q)))
+  }
+
+  function removeQueueItem(queueId) {
+    setUploadQueue((prev) => prev.filter((q) => q.id !== queueId))
+  }
+
+  async function handleFileUpload(e) {
+    const files = Array.from(e.target.files || [])
+    if (files.length === 0) return
+    if (fileInputRef.current) fileInputRef.current.value = ''
+
+    if (files.length === 1) {
+      // 파일 1건: 기존과 동일하게 즉시 현재 화면에 반영
+      setUploading(true)
+      try {
+        const result = await processResumeFile(files[0], targetJob)
+        setEditingApplicantId(null)
+        if (result.applicantName) setApplicantName(result.applicantName)
+        setCertifications(result.certifications)
+        if (result.entries.length > 0) {
+          setEntries(result.entries)
+          setExpandedIds(new Set())
+        }
+        setTab('manual')
+      } catch (err) {
+        alert(err.message + '\n정형 입력으로 직접 입력해주세요.')
+        setTab('manual')
+      } finally {
+        setUploading(false)
+      }
+      return
+    }
+
+    // 여러 파일: 순차 처리(서버 부하/레이트리밋 방지) 후 대기열에 쌓아두고, 하나씩 검토 후 불러오도록 함
+    const queueIds = files.map(() => crypto.randomUUID())
+    setUploadQueue((prev) => [
+      ...prev,
+      ...files.map((f, i) => ({ id: queueIds[i], filename: f.name, status: 'pending', applicantName: '', certifications: [], entries: [], error: '' })),
+    ])
+    setUploading(true)
+    for (let i = 0; i < files.length; i++) {
+      setUploadQueue((prev) => prev.map((q) => (q.id === queueIds[i] ? { ...q, status: 'extracting' } : q)))
+      try {
+        const result = await processResumeFile(files[i], targetJob)
+        setUploadQueue((prev) => prev.map((q) => (q.id === queueIds[i] ? { ...q, status: 'ready', ...result } : q)))
+      } catch (err) {
+        setUploadQueue((prev) => prev.map((q) => (q.id === queueIds[i] ? { ...q, status: 'error', error: err.message } : q)))
+      }
+    }
+    setUploading(false)
   }
 
   async function safeJson(res) {
@@ -520,14 +592,21 @@ export default function App() {
         return
       }
 
-      const bracket = mapRevenueToBracket(data.revenue_amount)
+      const auto = determineScaleAuto({
+        revenueWon: data.revenue_amount,
+        assetWon: data.asset_amount,
+        industryMatch: data.industry_threshold,
+      })
+      // 업종 기반 자동판정이 안 될 때만(업종 미확인 등) 매출액 단일 임계값 간이추정으로 대체
+      const bracket = auto.bracket || mapRevenueToBracket(data.revenue_amount)
       updateEntry(entryId, 'revenue_bracket', bracket)
       updateEntry(entryId, 'revenue_source', 'auto')
-      updateEntry(
-        entryId,
-        'revenue_raw_value',
-        `${formatWonToEok(data.revenue_amount)} (DART, ${data.revenue_year}년 사업보고서 기준)`
-      )
+      const rawParts = [
+        `매출 ${formatWonToEok(data.revenue_amount)}원 (DART, ${data.revenue_year}년 사업보고서 기준)`,
+        data.asset_amount != null ? `자산총액 ${formatWonToEok(data.asset_amount)}원` : null,
+        auto.reason,
+      ].filter(Boolean)
+      updateEntry(entryId, 'revenue_raw_value', rawParts.join(' · '))
       updateEntry(entryId, 'is_listed_hint', data.is_listed)
       updateEntry(entryId, 'market_hint', data.market)
       updateEntry(entryId, 'established_hint', data.established_date)
@@ -612,6 +691,44 @@ export default function App() {
     }
   }
 
+  function startNewApplicant() {
+    setApplicantName('')
+    setTargetJob('')
+    const e = newEntry()
+    setEntries([e])
+    setExpandedIds(new Set([e.id]))
+    setEditingApplicantId(null)
+    setResult(null)
+    setMatchedCategory(null)
+    setSalaryBandResult(null)
+    setReport('')
+    setCertifications([])
+    setSaveMsg('')
+  }
+
+  // 이력 관리 탭의 "재계산" 버튼 — 저장된 산출 스냅샷을 계산 화면에 불러와 수정할 수 있게 한다.
+  // 저장하면 career_entries는 최신 상태로 교체되고, calculation_results는 이력 보존을 위해 새로 추가된다(덮어쓰지 않음).
+  function loadForRecalculation(h) {
+    const snapshot = h.calc_snapshot
+    if (!snapshot?.perEntry?.length) {
+      alert('불러올 경력사항 스냅샷이 없습니다.')
+      return
+    }
+    const mapped = snapshot.perEntry.map((e) => ({ ...newEntry(), ...e, id: e.id || crypto.randomUUID() }))
+    setApplicantName(h.applicants?.name || '')
+    setTargetJob(h.applicants?.target_job || '')
+    setEntries(mapped)
+    setExpandedIds(new Set())
+    setEditingApplicantId(h.applicant_id)
+    setResult(null)
+    setMatchedCategory(snapshot.matchedCategory || null)
+    setSalaryBandResult(null)
+    setReport('')
+    setCertifications([])
+    setTab('manual')
+    setMainTab('calc')
+  }
+
   async function saveResult() {
     if (!result || !applicantName) {
       alert('지원자명을 입력하고 계산을 먼저 실행해주세요.')
@@ -625,16 +742,18 @@ export default function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          applicantId: editingApplicantId,
           applicantName,
           targetJob,
           entries: result.perEntry,
           result: resultWithSalary,
+          calculatedBy: savedBy || null,
         }),
       })
       const data = await safeJson(res)
       if (data.error) throw new Error(data.error)
 
-      setSaveMsg('저장 완료되었습니다.')
+      setSaveMsg(data.recalculated ? '재계산 결과가 새 이력으로 저장되었습니다 (기존 이력은 그대로 유지됩니다).' : '저장 완료되었습니다.')
       loadHistory()
 
       // 저장 완료 후 알림 메일 발송 시도 (실패해도 저장 자체 결과에는 영향 없음)
@@ -685,10 +804,18 @@ export default function App() {
       <h1>경력산출 자동화 시스템</h1>
       <div className="subtitle">인사기획팀 내부 전용 · v2026-08-16-03 (연봉밴드 UI 개편)</div>
 
+      <div className="row" style={{ marginBottom: 16, maxWidth: 320 }}>
+        <div className="field">
+          <label>담당자명 (저장/삭제 기록용, 선택)</label>
+          <input value={savedBy} onChange={(ev) => setSavedBy(ev.target.value)} placeholder="예: 김인사" />
+        </div>
+      </div>
+
       <div className="tab-group" style={{ marginBottom: 20 }}>
         <button className={mainTab === 'calc' ? 'active' : ''} onClick={() => setMainTab('calc')}>경력산출</button>
         <button className={mainTab === 'history' ? 'active' : ''} onClick={() => { setMainTab('history'); loadHistory() }}>이력 관리 {history.length > 0 ? `(${history.length})` : ''}</button>
         <button className={mainTab === 'salary' ? 'active' : ''} onClick={() => { setMainTab('salary'); loadSalaryBands() }}>연봉밴드</button>
+        <button className={mainTab === 'dashboard' ? 'active' : ''} onClick={() => { setMainTab('dashboard'); loadDashboard() }}>경영 리포트</button>
       </div>
 
       {mainTab === 'calc' && (
@@ -846,23 +973,57 @@ export default function App() {
 
           <div className="card">
             <h2>1. 지원자 정보</h2>
-            <p className="upload-first-hint">📄 이력서부터 업로드해주세요 — 이름 등 기본정보가 자동으로 채워집니다.</p>
+            {editingApplicantId && (
+              <div style={{ background: '#eef6ff', border: '1px solid #bcd8f5', color: '#1a4d80', padding: '8px 14px', borderRadius: 6, fontSize: 13, marginBottom: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10 }}>
+                <span>재계산 모드 — 저장하면 기존 이력에 새 산출 결과가 추가됩니다 (기존 이력은 삭제되지 않고 그대로 유지됨).</span>
+                <button type="button" className="secondary" style={{ padding: '3px 10px', fontSize: 12, whiteSpace: 'nowrap' }} onClick={startNewApplicant}>새 지원자로 시작</button>
+              </div>
+            )}
+            <p className="upload-first-hint">📄 이력서부터 업로드해주세요 — 이름 등 기본정보가 자동으로 채워집니다. (여러 명을 한 번에 처리하려면 파일을 여러 개 선택하세요)</p>
 
             <div className="tab-group">
               <button className={tab === 'upload' ? 'active' : ''} onClick={() => setTab('upload')}>이력서 업로드</button>
               <button className={tab === 'manual' ? 'active' : ''} onClick={() => setTab('manual')}>정형 입력</button>
             </div>
             {tab === 'upload' && (
-              <div className="upload-box" onClick={() => fileInputRef.current?.click()}>
-                {uploading ? '추출 중입니다...' : '클릭하여 이력서 PDF/이미지 업로드 (자동 추출)'}
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept=".pdf,image/*"
-                  style={{ display: 'none' }}
-                  onChange={handleFileUpload}
-                />
-              </div>
+              <>
+                <div className="upload-box" onClick={() => fileInputRef.current?.click()}>
+                  {uploading ? '처리 중입니다...' : '클릭하여 이력서 PDF/이미지 업로드 (여러 개 선택 시 배치 처리)'}
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept=".pdf,image/*"
+                    multiple
+                    style={{ display: 'none' }}
+                    onChange={handleFileUpload}
+                  />
+                </div>
+                {uploadQueue.length > 0 && (
+                  <div style={{ marginTop: 12 }}>
+                    <div style={{ fontSize: 12, color: '#666', marginBottom: 6 }}>
+                      배치 업로드 대기열 — 검토 대기 {uploadQueue.filter((q) => q.status === 'ready').length}건 / 전체 {uploadQueue.length}건
+                    </div>
+                    {uploadQueue.map((q) => (
+                      <div key={q.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '6px 10px', border: '1px solid #eee', borderRadius: 6, marginBottom: 4, fontSize: 12 }}>
+                        <span>
+                          {q.filename}
+                          {q.applicantName && ` — ${q.applicantName}`}
+                          {q.status === 'pending' && ' (대기 중...)'}
+                          {q.status === 'extracting' && ' (추출 중...)'}
+                          {q.status === 'error' && ` (실패: ${q.error})`}
+                          {q.status === 'opened' && ' (불러옴 ✓)'}
+                        </span>
+                        <span style={{ display: 'flex', gap: 6 }}>
+                          {q.status === 'ready' && (
+                            <button type="button" className="secondary" style={{ padding: '3px 8px', fontSize: 12 }} onClick={() => openQueueItem(q.id)}>불러오기</button>
+                          )}
+                          <button type="button" className="secondary" style={{ padding: '3px 8px', fontSize: 12 }} onClick={() => removeQueueItem(q.id)}>제거</button>
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </>
             )}
 
             <div className="row" style={{ marginTop: 14 }}>
@@ -1206,6 +1367,9 @@ export default function App() {
                 >
                   {historyDeleting ? '삭제 중...' : `선택 삭제 (${selectedHistoryIds.size})`}
                 </button>
+                <button className="secondary" onClick={() => window.open('/api/applicants?format=xlsx&limit=500', '_blank')}>
+                  엑셀 내보내기
+                </button>
               </div>
               <div style={{ overflowX: 'auto' }}>
                 <table>
@@ -1218,7 +1382,7 @@ export default function App() {
                           onChange={(ev) => setSelectedHistoryIds(ev.target.checked ? new Set(history.map((h) => h.id)) : new Set())}
                         />
                       </th>
-                      <th>이름</th><th>직무군</th><th>인정경력</th><th>예상직급/연봉</th><th>날짜</th><th style={{ width: 60 }}></th>
+                      <th>이름</th><th>직무군</th><th>인정경력</th><th>예상직급/연봉</th><th>날짜</th><th style={{ width: 140 }}></th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1243,7 +1407,7 @@ export default function App() {
                               {sb && !sb.noData ? `${sb.grade}${sb.step}호봉 · ${sb.minSalary.toLocaleString('ko-KR')}~${sb.maxSalary.toLocaleString('ko-KR')}천원` : '-'}
                             </td>
                             <td>{new Date(h.calculated_at).toLocaleDateString('ko-KR')}</td>
-                            <td>
+                            <td style={{ whiteSpace: 'nowrap' }}>
                               <button
                                 type="button"
                                 className="secondary"
@@ -1252,6 +1416,16 @@ export default function App() {
                                 disabled={!snapshot}
                               >
                                 {isExpanded ? '접기' : '상세'}
+                              </button>
+                              <button
+                                type="button"
+                                className="secondary"
+                                style={{ padding: '4px 10px', fontSize: 12, marginLeft: 4 }}
+                                onClick={() => loadForRecalculation(h)}
+                                disabled={!snapshot}
+                                title="이 산출 내역을 계산 화면에 불러와 수정 후 다시 계산합니다 (기존 이력은 유지됨)"
+                              >
+                                재계산
                               </button>
                             </td>
                           </tr>
@@ -1278,6 +1452,65 @@ export default function App() {
               </div>
             </>
           )}
+        </div>
+      )}
+
+      {mainTab === 'dashboard' && (
+        <div className="card">
+          <h2>경영 리포트 — 채용 추이 · 예상 인건비</h2>
+          <p style={{ fontSize: 12, color: '#888', marginBottom: 12 }}>
+            저장된 산출 이력을 집계한 참고용 리포트입니다. 예상 인건비는 각 지원자의 연봉밴드 MIN~MAX 중간값을 합산한 추정치이며, 실제 확정 연봉과 다를 수 있습니다.
+            (근속·성과 등 실제 데이터와 비교 검증하는 기능은 현재 시스템에 그런 데이터가 없어 아직 제공하지 않습니다.)
+          </p>
+          {dashboardLoading && <p style={{ fontSize: 13, color: '#888' }}>불러오는 중...</p>}
+          {!dashboardLoading && dashboardHistory.length === 0 && <p style={{ color: '#888', fontSize: 13 }}>집계할 이력이 없습니다.</p>}
+          {!dashboardLoading && dashboardHistory.length > 0 && (() => {
+            const byMonth = new Map()
+            const byCategory = new Map()
+            let totalMidSalary = 0
+            let countedForSalary = 0
+            for (const h of dashboardHistory) {
+              const month = h.calculated_at ? h.calculated_at.slice(0, 7) : '미상'
+              byMonth.set(month, (byMonth.get(month) || 0) + 1)
+              const cat = h.calc_snapshot?.matchedCategory || '미분류'
+              byCategory.set(cat, (byCategory.get(cat) || 0) + 1)
+              const band = h.calc_snapshot?.salaryBandResult
+              if (band && !band.noData && band.minSalary != null && band.maxSalary != null) {
+                totalMidSalary += ((Number(band.minSalary) + Number(band.maxSalary)) / 2) * 1000
+                countedForSalary += 1
+              }
+            }
+            const months = [...byMonth.keys()].sort()
+            const categories = [...byCategory.entries()].sort((a, b) => b[1] - a[1])
+            return (
+              <>
+                <div className="salary-band-box" style={{ marginBottom: 20 }}>
+                  <span>집계 대상: <b>{dashboardHistory.length}건</b></span>
+                  <span>연봉밴드 매칭된 {countedForSalary}건 기준 예상 인건비 합계(중간값 기준): <b>{Math.round(totalMidSalary).toLocaleString('ko-KR')}천원</b></span>
+                </div>
+
+                <h3 style={{ fontSize: 14, marginBottom: 8 }}>월별 산출 건수</h3>
+                <table style={{ marginBottom: 20 }}>
+                  <thead><tr><th>월</th><th>건수</th></tr></thead>
+                  <tbody>
+                    {months.map((m) => (
+                      <tr key={m}><td>{m}</td><td>{byMonth.get(m)}건</td></tr>
+                    ))}
+                  </tbody>
+                </table>
+
+                <h3 style={{ fontSize: 14, marginBottom: 8 }}>직무군별 산출 건수</h3>
+                <table>
+                  <thead><tr><th>직무군</th><th>건수</th></tr></thead>
+                  <tbody>
+                    {categories.map(([cat, count]) => (
+                      <tr key={cat}><td>{cat}</td><td>{count}건</td></tr>
+                    ))}
+                  </tbody>
+                </table>
+              </>
+            )
+          })()}
         </div>
       )}
 

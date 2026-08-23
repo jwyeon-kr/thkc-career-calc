@@ -13,6 +13,7 @@
 // DB에 저장하지 않고 화면 참고정보로만 사용 — 돌봄도메인 특례 체크 여부 판단 시 담당자가 참고할 힌트.
 
 import { createClient } from '@supabase/supabase-js'
+import { callAnthropic } from '../shared/anthropic.js'
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
@@ -83,24 +84,15 @@ ${jobMatchInstruction}
     : { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64Data } }
 
   try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': process.env.ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-5',
-        max_tokens: 2000,
-        system: systemPrompt,
-        messages: [
-          {
-            role: 'user',
-            content: [contentBlock, { type: 'text', text: '이 이력서에서 경력 정보를 JSON으로 추출해줘. company_name/department/job_title은 반드시 분리해줘.' }],
-          },
-        ],
-      }),
+    const response = await callAnthropic({
+      system: systemPrompt,
+      maxTokens: 4000, // 경력이 많은 지원자(10건 이상)에서 응답이 잘리는 문제 방지 (기존 2000 -> 4000)
+      messages: [
+        {
+          role: 'user',
+          content: [contentBlock, { type: 'text', text: '이 이력서에서 경력 정보를 JSON으로 추출해줘. company_name/department/job_title은 반드시 분리해줘.' }],
+        },
+      ],
     })
 
     if (!response.ok) {

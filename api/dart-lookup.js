@@ -18,9 +18,12 @@
 // 매칭이 안 되던 버그 수정. 괄호(전각/반각) 안 내용을 전부 제거하도록 정규화 로직 강화.
 
 import { createClient } from '@supabase/supabase-js'
+import { lookupIndustryThreshold } from '../shared/industryScaleTable.js'
 
 const REVENUE_ACCOUNT_NAMES = ['매출액', '수익(매출액)', '영업수익', '매출']
 const STATEMENT_TYPES = new Set(['IS', 'CIS']) // 손익계산서 / 포괄손익계산서
+const ASSET_ACCOUNT_NAMES = ['자산총계']
+const BS_STATEMENT_TYPES = new Set(['BS', 'CFS']) // 재무상태표 / 연결재무상태표
 
 function normalizeName(name) {
   return (name || '')
@@ -73,6 +76,7 @@ async function fetchCompanyOverview(apiKey, corpCode) {
     return {
       market: mapCorpCls(data.corp_cls),
       establishedDate: data.est_dt || null, // YYYYMMDD 형식
+      industryCode: data.induty_code || null, // 통계청 표준산업분류 코드 (기업규모 판정용)
     }
   } catch {
     return null // 참고정보이므로 실패해도 전체 조회를 막지 않음
@@ -81,7 +85,10 @@ async function fetchCompanyOverview(apiKey, corpCode) {
 
 // 지원 시점 기준 가장 최근 확정된 사업연도(currentYear - 1) 단일 연도만 조회.
 // 예: 2026년에 조회하면 2025년 사업보고서만 봄. 해당 연도 데이터가 없으면 바로 실패 반환.
-async function fetchRevenue(apiKey, corpCode) {
+// [2026-08-23 수정] 매출액과 함께 자산총계도 같은 응답에서 함께 추출 (기업규모 판정용, API 호출 추가 없음).
+// ⚠️ 중소기업기본법상 "평균매출액등"은 원칙적으로 직전 3개 사업연도 평균이지만,
+// 이 함수는 2026-08-15 변경 이후 직전 1개년만 조회한다 — 자동판정은 참고용이며 정확한 3년 평균이 아니다.
+async function fetchRevenueAndAssets(apiKey, corpCode) {
   const targetYear = new Date().getFullYear() - 1
 
   const url = `https://opendart.fss.or.kr/api/fnlttSinglAcnt.json?crtfc_key=${apiKey}&corp_code=${corpCode}&bsns_year=${targetYear}&reprt_code=11011`
@@ -98,13 +105,20 @@ async function fetchRevenue(apiKey, corpCode) {
   const revenueRow = data.list.find(
     (row) => STATEMENT_TYPES.has(row.sj_div) && REVENUE_ACCOUNT_NAMES.includes((row.account_nm || '').trim())
   )
+  const assetRow = data.list.find(
+    (row) => BS_STATEMENT_TYPES.has(row.sj_div) && ASSET_ACCOUNT_NAMES.includes((row.account_nm || '').trim())
+  )
+
+  const result = { year: targetYear, amount: null, assetAmount: null }
   if (revenueRow && revenueRow.thstrm_amount) {
     const amount = Number(String(revenueRow.thstrm_amount).replace(/,/g, ''))
-    if (!isNaN(amount)) {
-      return { year: targetYear, amount, accountName: revenueRow.account_nm }
-    }
+    if (!isNaN(amount)) result.amount = amount
   }
-  return null
+  if (assetRow && assetRow.thstrm_amount) {
+    const assetAmount = Number(String(assetRow.thstrm_amount).replace(/,/g, ''))
+    if (!isNaN(assetAmount)) result.assetAmount = assetAmount
+  }
+  return result.amount != null ? result : null
 }
 
 export default async function handler(req, res) {
@@ -168,9 +182,10 @@ export default async function handler(req, res) {
 
     const isListed = !!(corp.stock_code && String(corp.stock_code).trim())
     const [revenueResult, overview] = await Promise.all([
-      fetchRevenue(apiKey, corp.corp_code),
+      fetchRevenueAndAssets(apiKey, corp.corp_code),
       fetchCompanyOverview(apiKey, corp.corp_code),
     ])
+    const industryThreshold = overview?.industryCode ? lookupIndustryThreshold(overview.industryCode) : null
 
     if (!revenueResult) {
       return res.status(200).json({
@@ -180,6 +195,8 @@ export default async function handler(req, res) {
         is_listed: isListed,
         market: overview?.market || null,
         established_date: overview?.establishedDate || null,
+        industry_code: overview?.industryCode || null,
+        industry_threshold: industryThreshold,
         revenue_found: false,
         reason: `회사는 조회되었으나 ${new Date().getFullYear() - 1}년 재무제표에서 매출액을 찾지 못했습니다. 매출구간은 필수가 아니므로 비워두고 계산을 진행할 수 있습니다.`,
       })
@@ -192,10 +209,12 @@ export default async function handler(req, res) {
       is_listed: isListed,
       market: overview?.market || null,
       established_date: overview?.establishedDate || null,
+      industry_code: overview?.industryCode || null,
+      industry_threshold: industryThreshold,
       revenue_found: true,
       revenue_amount: revenueResult.amount,
       revenue_year: revenueResult.year,
-      matched_account_name: revenueResult.accountName,
+      asset_amount: revenueResult.assetAmount,
     })
   } catch (err) {
     return res.status(500).json({ error: 'DART 조회 중 오류: ' + err.message })

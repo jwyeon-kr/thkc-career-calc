@@ -4,6 +4,8 @@
 // 계산 자체는 이미 서버가 아닌 클라이언트(calculator.js)에서 끝난 상태이며,
 // 이 API는 그 결과를 요약 설명하는 용도로만 쓰인다 (계산 로직 자체에 관여하지 않음).
 
+import { callAnthropic } from '../shared/anthropic.js'
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'POST만 허용됩니다.' })
@@ -56,19 +58,10 @@ ${JSON.stringify(entrySummaries, null, 2)}
 위 데이터를 바탕으로 설명 리포트를 작성해주세요.`
 
   try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': process.env.ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-5',
-        max_tokens: 1200,
-        system: systemPrompt,
-        messages: [{ role: 'user', content: userContent }],
-      }),
+    const response = await callAnthropic({
+      system: systemPrompt,
+      maxTokens: 1200,
+      messages: [{ role: 'user', content: userContent }],
     })
     if (!response.ok) {
       const errText = await response.text()

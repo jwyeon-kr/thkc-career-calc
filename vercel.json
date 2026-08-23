@@ -14,6 +14,15 @@
     },
     "api/get-upload-url.js": {
       "maxDuration": 15
+    },
+    "api/match-job.js": {
+      "maxDuration": 20
+    },
+    "api/match-job-category.js": {
+      "maxDuration": 20
+    },
+    "api/generate-report.js": {
+      "maxDuration": 20
     }
   },
   "crons": [

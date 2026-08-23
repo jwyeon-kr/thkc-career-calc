@@ -5,6 +5,7 @@
 // 코드 수정 없이 자동으로 따라간다.
 
 import { createClient } from '@supabase/supabase-js'
+import { callAnthropic } from '../shared/anthropic.js'
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
@@ -50,19 +51,10 @@ export default async function handler(req, res) {
 본부 목록과 소속 세부직무: ${categoryDescriptions}
 분류가 애매하면 세부직무 키워드와 가장 근접한 본부를 선택하세요.`
 
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': process.env.ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-5',
-        max_tokens: 100,
-        system: systemPrompt,
-        messages: [{ role: 'user', content: `지원 직무: ${targetJob}` }],
-      }),
+    const response = await callAnthropic({
+      system: systemPrompt,
+      maxTokens: 100,
+      messages: [{ role: 'user', content: `지원 직무: ${targetJob}` }],
     })
     if (!response.ok) {
       const errText = await response.text()

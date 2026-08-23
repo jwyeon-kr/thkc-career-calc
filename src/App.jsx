@@ -536,6 +536,12 @@ export default function App() {
     if (files.length === 0) return
     if (fileInputRef.current) fileInputRef.current.value = ''
 
+    // 지원팀/직무가 비어있으면 job_match_suggestion 자체가 생략된다(extract.js가 targetJob 없을 때 요청 안 함) —
+    // 조용히 누락되는 대신 미리 알려주고 계속할지 확인
+    if (!targetJob.trim() && !confirm('지원팀/직무가 비어있습니다. 이대로 진행하면 직무매칭 자동제안이 생략됩니다(업종매칭은 영향 없음). 계속하시겠습니까?')) {
+      return
+    }
+
     if (files.length === 1) {
       // 파일 1건: 기존과 동일하게 즉시 현재 화면에 반영
       setUploading(true)
@@ -1030,7 +1036,18 @@ export default function App() {
                 <button type="button" className="secondary" style={{ padding: '3px 10px', fontSize: 12, whiteSpace: 'nowrap' }} onClick={startNewApplicant}>새 지원자로 시작</button>
               </div>
             )}
-            <p className="upload-first-hint">📄 이력서부터 업로드해주세요 — 이름 등 기본정보가 자동으로 채워집니다. (여러 명을 한 번에 처리하려면 파일을 여러 개 선택하세요)</p>
+            <div className="row" style={{ marginTop: 0 }}>
+              <div className="field">
+                <label>지원자 이름</label>
+                <input value={applicantName} onChange={(e) => setApplicantName(e.target.value)} />
+              </div>
+              <div className="field">
+                <label>지원팀/직무(키워드)</label>
+                <input value={targetJob} onChange={(e) => setTargetJob(e.target.value)} placeholder="예: 재무팀/회계" />
+              </div>
+            </div>
+
+            <p className="upload-first-hint">📄 지원팀/직무부터 입력한 뒤 이력서를 업로드해주세요 — 직무매칭까지 한 번에 자동 제안됩니다. (여러 명을 한 번에 처리하려면 파일을 여러 개 선택하세요)</p>
 
             <div className="tab-group">
               <button className={tab === 'upload' ? 'active' : ''} onClick={() => setTab('upload')}>이력서 업로드</button>
@@ -1076,17 +1093,6 @@ export default function App() {
                 )}
               </>
             )}
-
-            <div className="row" style={{ marginTop: 14 }}>
-              <div className="field">
-                <label>지원자 이름</label>
-                <input value={applicantName} onChange={(e) => setApplicantName(e.target.value)} />
-              </div>
-              <div className="field">
-                <label>지원 직무</label>
-                <input value={targetJob} onChange={(e) => setTargetJob(e.target.value)} />
-              </div>
-            </div>
             {certifications.length > 0 && (
               <p style={{ fontSize: 12, color: '#666', marginTop: 8 }}>
                 📋 이력서상 자격증: {certifications.join(', ')} (참고정보 — 돌봄도메인 특례 등 판단 시 참고, 자동반영 아님)

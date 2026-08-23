@@ -429,10 +429,10 @@ export default function App() {
     }
     updateEntry(entryId, 'industry_match_suggesting', true)
     try {
-      const res = await fetch('/api/match-industry', {
+      const res = await fetch('/api/match-job', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ companyName: entry.company_name, jobTitle: entry.job_title }),
+        body: JSON.stringify({ kind: 'industry', companyName: entry.company_name, jobTitle: entry.job_title }),
       })
       const data = await safeJson(res)
       if (data.error) throw new Error(data.error)

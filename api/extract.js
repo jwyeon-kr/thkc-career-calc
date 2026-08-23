@@ -55,6 +55,14 @@ export default async function handler(req, res) {
 이 분류는 참고용 제안이며 담당자가 최종 확인합니다.`
     : ''
 
+  // [2026-08-23 추가] 업종매칭(동종/유사/기타)은 지원 직무와 무관하게 THKC 사업영역 기준 고정 판단이라
+  // targetJob 유무와 상관없이 항상 함께 제안받는다 (같은 API 호출 안에서 처리 — 별도 호출 불필요).
+  const industryMatchInstruction = `각 경력의 "company_name"(및 알 수 있다면 업종)을 보고 THKC(시니어산업 복지용구 유통 플랫폼 회사)의 사업영역과 비교하여 "industry_match_suggestion" 필드에 다음 기준으로 분류해 함께 반환하세요:
+- "동종": 자사 웹/앱 서비스 제공, 의료기기/용품 유통·도소매, 사회보장서비스 관련
+- "유사": 웹/앱 서비스이나 자사 플랫폼 아님, 유통·도소매이나 취급 재화가 의료기기/복지용구가 아님, 대행업(SI/광고대행/3PL/세무회계/콜센터 등)
+- "기타": 위 기준에 해당하지 않는 다른 업종
+이 분류도 참고용 제안이며 담당자가 최종 확인합니다.`
+
   const systemPrompt = `당신은 이력서에서 경력 정보를 추출하는 도구입니다.
 반드시 아래 JSON 형식으로만 응답하세요. 다른 설명, 마크다운, 코드블록 없이 순수 JSON만 출력합니다.
 
@@ -69,13 +77,15 @@ export default async function handler(req, res) {
       "raw_position_text": "이력서에 표기된 직책/부서/직무 원문 그대로 (분리가 애매할 때 대조용, 예: '재무회계팀.회계')",
       "start_date": "YYYY-MM-DD (일자 불명확 시 YYYY-MM-01)",
       "end_date": "YYYY-MM-DD (재직중이면 오늘 날짜)",
-      "employment_type_guess": "정규직/계약직/파견/인턴 중 이력서에서 유추 가능하면 표기, 불명확하면 '정규직'"${targetJob ? ',\n      "job_match_suggestion": "동일/유사/기타 중 하나"' : ''}
+      "employment_type_guess": "정규직/계약직/파견/인턴 중 이력서에서 유추 가능하면 표기, 불명확하면 '정규직'",
+      "industry_match_suggestion": "동종/유사/기타 중 하나"${targetJob ? ',\n      "job_match_suggestion": "동일/유사/기타 중 하나"' : ''}
     }
   ]
 }
 
 중요: company_name, department, job_title은 반드시 분리하세요. 이력서에 "OO팀.OO" 또는 "OO팀 - OO담당"처럼 부서와 직무가 한 표기로 붙어 있어도, 마침표/줄바꿈/하이픈 등을 기준으로 부서와 직무를 나누어 각각의 필드에 넣으세요. 분리가 정말 불가능한 경우에만 job_title에 원문 전체를 넣고, department는 빈 문자열로 두세요.
 
+${industryMatchInstruction}
 ${jobMatchInstruction}
 날짜를 알 수 없으면 최대한 합리적으로 추정하되, 확실하지 않은 항목은 비워두지 말고 빈 문자열 대신 추정값을 넣으세요.`
 

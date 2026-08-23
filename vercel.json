@@ -19,6 +19,9 @@
     "api/match-job.js": {
       "maxDuration": 20
     },
+    "api/match-industry.js": {
+      "maxDuration": 20
+    },
     "api/match-job-category.js": {
       "maxDuration": 20
     },

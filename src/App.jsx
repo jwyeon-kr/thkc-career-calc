@@ -7,6 +7,7 @@ import jsPDF from 'jspdf'
 
 const EMPLOYMENT_TYPES = ['정규직', '계약직', '파견', '인턴']
 const MATCH_LEVELS = ['동일', '유사', '기타']
+const INDUSTRY_MATCH_LEVELS = ['동종', '유사', '기타']
 const REVENUE_BRACKETS = ['중소', '중견', '대기업']
 
 function newEntry() {
@@ -37,6 +38,7 @@ function newEntry() {
     audit_report_url: null,
     audit_report_label: null,
     audit_extract_hint: null,
+    industry_match_suggesting: false,
   }
 }
 
@@ -419,6 +421,29 @@ export default function App() {
     }
   }
 
+  async function suggestIndustryMatch(entryId) {
+    const entry = entries.find((e) => e.id === entryId)
+    if (!entry.company_name?.trim()) {
+      alert('회사명을 먼저 입력해주세요.')
+      return
+    }
+    updateEntry(entryId, 'industry_match_suggesting', true)
+    try {
+      const res = await fetch('/api/match-industry', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ companyName: entry.company_name, jobTitle: entry.job_title }),
+      })
+      const data = await safeJson(res)
+      if (data.error) throw new Error(data.error)
+      updateEntry(entryId, 'industry_match', data.industry_match_suggestion)
+    } catch (err) {
+      alert('업종매칭 제안 실패: ' + err.message)
+    } finally {
+      updateEntry(entryId, 'industry_match_suggesting', false)
+    }
+  }
+
   function toggleExpand(id) {
     setExpandedIds((prev) => {
       const next = new Set(prev)
@@ -476,6 +501,7 @@ export default function App() {
       end_date: c.end_date || '',
       employment_type: EMPLOYMENT_TYPES.includes(c.employment_type_guess) ? c.employment_type_guess : '정규직',
       job_match: MATCH_LEVELS.includes(c.job_match_suggestion) ? c.job_match_suggestion : '',
+      industry_match: INDUSTRY_MATCH_LEVELS.includes(c.industry_match_suggestion) ? c.industry_match_suggestion : '',
       job_title: c.job_title || '',
       listed_bonus_eligible_job: suggestListedBonusEligible(c.job_title || ''),
     }))
@@ -598,11 +624,21 @@ export default function App() {
         }
         if (data.audit_extract_experimental) {
           const ex = data.audit_extract_experimental
+          // 감사보고서 실험적 추출값도 사업보고서 케이스와 동일한 판정 로직을 태워 드롭다운까지 채운다.
+          // 다만 출처(revenue_source)를 'auto-experimental'로 별도 표시해 화면에서 구분되게 한다 —
+          // 저장 전까지는 어차피 담당자가 모두 눈으로 검토하는 구조라, 안 채우는 것보다 "강한 경고 + 제안값"이 더 실용적.
+          const auto = determineScaleAuto({ revenueWon: ex.revenue, assetWon: ex.asset, industryMatch: data.industry_threshold })
+          const bracket = auto.bracket || (ex.revenue != null ? mapRevenueToBracket(ex.revenue) : '')
+          if (bracket) {
+            updateEntry(entryId, 'revenue_bracket', bracket)
+            updateEntry(entryId, 'revenue_source', 'auto-experimental')
+          }
           const parts = [
             ex.revenue != null ? `매출 ${formatWonToEok(ex.revenue)}원` : null,
             ex.asset != null ? `자산총액 ${formatWonToEok(ex.asset)}원` : null,
+            auto.reason,
           ].filter(Boolean)
-          updateEntry(entryId, 'audit_extract_hint', `자동추출 시도값(검증 필요): ${parts.join(', ')}`)
+          updateEntry(entryId, 'audit_extract_hint', `⚠ 실험적 자동추출 기반(원문 대조 필수): ${parts.join(', ')}`)
         }
         return
       }
@@ -1173,10 +1209,20 @@ export default function App() {
                         </div>
                         <div className="entry-field">
                           <label>업종매칭</label>
-                          <select value={e.industry_match} onChange={(ev) => updateEntry(e.id, 'industry_match', ev.target.value)} className={!e.industry_match ? 'unconfirmed' : ''}>
-                            <option value="">미확인</option>
-                            <option value="동종">동종</option><option value="유사">유사</option><option value="기타">기타</option>
-                          </select>
+                          <div className="entry-revenue-row">
+                            <select value={e.industry_match} onChange={(ev) => updateEntry(e.id, 'industry_match', ev.target.value)} className={!e.industry_match ? 'unconfirmed' : ''}>
+                              <option value="">미확인</option>
+                              <option value="동종">동종</option><option value="유사">유사</option><option value="기타">기타</option>
+                            </select>
+                            <button
+                              type="button"
+                              className="secondary"
+                              onClick={() => suggestIndustryMatch(e.id)}
+                              disabled={e.industry_match_suggesting}
+                            >
+                              {e.industry_match_suggesting ? '제안중...' : 'AI 제안'}
+                            </button>
+                          </div>
                           {(e.market_hint || e.established_hint) && (
                             <div className="entry-field-hint">
                               참고: {e.market_hint || '비상장'}

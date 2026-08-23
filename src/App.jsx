@@ -1063,18 +1063,12 @@ export default function App() {
                 <button type="button" className="secondary" style={{ padding: '3px 10px', fontSize: 12, whiteSpace: 'nowrap' }} onClick={startNewApplicant}>새 지원자로 시작</button>
               </div>
             )}
-            <div className="row" style={{ marginTop: 0 }}>
-              <div className="field">
-                <label>지원자 이름</label>
-                <input value={applicantName} onChange={(e) => setApplicantName(e.target.value)} />
-              </div>
-              <div className="field">
-                <label>지원팀/직무(키워드)</label>
-                <input value={targetJob} onChange={(e) => setTargetJob(e.target.value)} placeholder="예: 재무팀/회계" />
-              </div>
+            <div className="field" style={{ maxWidth: 320 }}>
+              <label>지원팀/직무(키워드) — 먼저 입력해주세요</label>
+              <input value={targetJob} onChange={(e) => setTargetJob(e.target.value)} placeholder="예: 재무팀/회계" />
             </div>
 
-            <p className="upload-first-hint">📄 지원팀/직무부터 입력한 뒤 이력서를 업로드해주세요 — 직무매칭 자동 제안 + 경력별 DART 기업정보(기업규모/상장여부) 자동조회까지 한 번에 처리됩니다. (여러 명을 한 번에 처리하려면 파일을 여러 개 선택하세요)</p>
+            <p className="upload-first-hint">📄 그 다음 이력서를 업로드하세요 — 지원자 이름은 자동으로 채워지고, 직무매칭·업종매칭 자동 제안 + 경력별 DART 기업정보(기업규모/상장여부) 자동조회까지 한 번에 처리됩니다. (여러 명을 한 번에 처리하려면 파일을 여러 개 선택하세요)</p>
 
             <div className="tab-group">
               <button className={tab === 'upload' ? 'active' : ''} onClick={() => setTab('upload')}>이력서 업로드</button>
@@ -1120,6 +1114,11 @@ export default function App() {
                 )}
               </>
             )}
+
+            <div className="field" style={{ maxWidth: 320, marginTop: 14 }}>
+              <label>지원자 이름 <span style={{ fontWeight: 400, color: '#888' }}>(이력서 업로드 시 자동입력, 필요시 직접 수정)</span></label>
+              <input value={applicantName} onChange={(e) => setApplicantName(e.target.value)} />
+            </div>
             {certifications.length > 0 && (
               <p style={{ fontSize: 12, color: '#666', marginTop: 8 }}>
                 📋 이력서상 자격증: {certifications.join(', ')} (참고정보 — 돌봄도메인 특례 등 판단 시 참고, 자동반영 아님)

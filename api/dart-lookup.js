@@ -18,6 +18,7 @@
 // 매칭이 안 되던 버그 수정. 괄호(전각/반각) 안 내용을 전부 제거하도록 정규화 로직 강화.
 
 import { createClient } from '@supabase/supabase-js'
+import JSZip from 'jszip'
 import { lookupIndustryThreshold } from '../shared/industryScaleTable.js'
 
 const REVENUE_ACCOUNT_NAMES = ['매출액', '수익(매출액)', '영업수익', '매출']
@@ -121,6 +122,93 @@ async function fetchRevenueAndAssets(apiKey, corpCode) {
   return result.amount != null ? result : null
 }
 
+// [2026-08-23 추가] 사업보고서 계열 API(fnlttSinglAcnt)는 "정기보고서"(사업/반기/분기보고서)에만
+// 연결된 XBRL만 조회한다 — 감사보고서만 제출하는 비상장 중소/중견기업(THKC 지원자 다수가 여기 해당)은
+// 이 API로는 절대 조회되지 않는다(연도를 바꿔도 소용없음. 애초에 다른 데이터 창고를 봄).
+// 아래는 "감사보고서/연결감사보고서" 제출 이력 자체는 확실하게 찾아서 원문 링크를 안내하고,
+// 거기 첨부된 문서에서 매출액/자산총계를 최선노력으로(비공식, 검증 필요) 추출 시도한다.
+async function findAuditReportFiling(apiKey, corpCode) {
+  const today = new Date()
+  const end = today.toISOString().slice(0, 10).replace(/-/g, '')
+  const start = new Date(today.getFullYear() - 2, today.getMonth(), today.getDate())
+    .toISOString().slice(0, 10).replace(/-/g, '')
+  const url = `https://opendart.fss.or.kr/api/list.json?crtfc_key=${apiKey}&corp_code=${corpCode}&bgn_de=${start}&end_de=${end}&pblntf_ty=F&page_count=100`
+  let res
+  try {
+    res = await fetch(url, { signal: AbortSignal.timeout(15000) })
+  } catch {
+    return null
+  }
+  if (!res.ok) return null
+  const data = await res.json()
+  if (data.status !== '000' || !Array.isArray(data.list)) return null
+
+  const filings = data.list.filter((row) => (row.report_nm || '').includes('감사보고서'))
+  if (filings.length === 0) return null
+
+  // 최신 제출건 우선, 동일 접수일이면 연결감사보고서를 개별감사보고서보다 우선
+  filings.sort((a, b) => {
+    if (a.rcept_dt !== b.rcept_dt) return b.rcept_dt.localeCompare(a.rcept_dt)
+    const aConsolidated = a.report_nm.includes('연결') ? 1 : 0
+    const bConsolidated = b.report_nm.includes('연결') ? 1 : 0
+    return bConsolidated - aConsolidated
+  })
+  const top = filings[0]
+  return {
+    rcept_no: top.rcept_no,
+    report_nm: top.report_nm,
+    rcept_dt: top.rcept_dt,
+    url: `https://dart.fss.or.kr/dsaf001/main.do?rcpNo=${top.rcept_no}`,
+  }
+}
+
+// 실험적 자동추출 — 정식 XBRL 파싱이 아니라, 원문 첨부파일(ZIP) 안 텍스트에서
+// "매출액"/"자산총계" 라벨 뒤에 나오는 숫자를 정규식으로 찾는 방식이다(정확도 보장 안 됨).
+// 실패하면 조용히 null을 반환하고, 화면에서는 항상 원문 링크(findAuditReportFiling의 url)를
+// 함께 보여줘서 사람이 대조 확인하도록 한다 — 이 값만으로 매출구간을 자동 확정하지 않는다.
+async function tryExtractFromAuditReport(apiKey, rceptNo) {
+  const url = `https://opendart.fss.or.kr/api/document.xml?crtfc_key=${apiKey}&rcept_no=${rceptNo}`
+  let res
+  try {
+    res = await fetch(url, { signal: AbortSignal.timeout(20000) })
+  } catch {
+    return null
+  }
+  if (!res.ok) return null
+
+  const buf = Buffer.from(await res.arrayBuffer())
+  if (buf.slice(0, 2).toString() !== 'PK') return null // ZIP이 아니면(에러 응답 등) 포기
+
+  let allText = ''
+  try {
+    const zip = await JSZip.loadAsync(buf)
+    for (const filename of Object.keys(zip.files)) {
+      const file = zip.files[filename]
+      if (file.dir) continue
+      try {
+        allText += (await file.async('string')) + '\n'
+      } catch {
+        // 이미지 등 텍스트로 못 읽는 첨부는 건너뜀
+      }
+    }
+  } catch {
+    return null
+  }
+  if (!allText) return null
+
+  const flat = allText.replace(/<[^>]+>/g, ' ').replace(/&nbsp;|&#\d+;/g, ' ')
+
+  function extractNumber(pattern) {
+    const m = flat.match(pattern)
+    if (!m) return null
+    const n = Number(m[1].replace(/,/g, ''))
+    return !isNaN(n) && n > 0 && n < 900_000_000_000_000 ? n : null // 900조원 미만 sanity check
+  }
+  const revenue = extractNumber(/매\s*출\s*액[^0-9\-]{0,60}?([\d,]{7,})/)
+  const asset = extractNumber(/자\s*산\s*총\s*계[^0-9\-]{0,60}?([\d,]{7,})/)
+  return revenue != null || asset != null ? { revenue, asset } : null
+}
+
 export default async function handler(req, res) {
   const companyName = req.method === 'GET' ? req.query.company : req.body?.company
   const explicitCorpCode = req.method === 'GET' ? req.query.corp_code : req.body?.corp_code
@@ -188,6 +276,17 @@ export default async function handler(req, res) {
     const industryThreshold = overview?.industryCode ? lookupIndustryThreshold(overview.industryCode) : null
 
     if (!revenueResult) {
+      // 사업보고서 계열에서 못 찾았다고 바로 포기하지 않고, 감사보고서 제출 이력을 확인한다
+      // (THKC 지원자 다수가 사업보고서는 안 내고 감사보고서만 내는 비상장 중소/중견기업일 가능성이 높음).
+      const auditFiling = await findAuditReportFiling(apiKey, corp.corp_code).catch(() => null)
+      const auditExtract = auditFiling
+        ? await tryExtractFromAuditReport(apiKey, auditFiling.rcept_no).catch(() => null)
+        : null
+
+      const reason = auditFiling
+        ? `사업보고서 계열 데이터는 없지만, 감사보고서(${auditFiling.rcept_dt} 제출, "${auditFiling.report_nm}")가 확인됩니다. 자동추출은 정식 API가 아니라 참고용이니, 아래 원문 링크에서 매출액·자산총액을 직접 확인 후 입력해주세요.`
+        : `회사는 조회되었으나 ${new Date().getFullYear() - 1}년 재무제표에서 매출액을 찾지 못했고, 감사보고서 제출 이력도 확인되지 않았습니다. 매출구간은 필수가 아니므로 비워두고 계산을 진행할 수 있습니다.`
+
       return res.status(200).json({
         found: true,
         corp_name: corp.corp_name,
@@ -198,7 +297,9 @@ export default async function handler(req, res) {
         industry_code: overview?.industryCode || null,
         industry_threshold: industryThreshold,
         revenue_found: false,
-        reason: `회사는 조회되었으나 ${new Date().getFullYear() - 1}년 재무제표에서 매출액을 찾지 못했습니다. 매출구간은 필수가 아니므로 비워두고 계산을 진행할 수 있습니다.`,
+        reason,
+        audit_report: auditFiling,
+        audit_extract_experimental: auditExtract,
       })
     }
 

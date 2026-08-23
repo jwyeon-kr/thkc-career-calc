@@ -2,7 +2,8 @@
   "regions": ["icn1"],
   "functions": {
     "api/dart-lookup.js": {
-      "maxDuration": 30
+      "maxDuration": 45,
+      "memory": 1024
     },
     "api/dart-refresh-cache.js": {
       "maxDuration": 60,

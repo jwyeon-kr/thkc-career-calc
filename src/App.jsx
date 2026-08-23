@@ -34,6 +34,9 @@ function newEntry() {
     is_listed_hint: null,
     market_hint: null,
     established_hint: null,
+    audit_report_url: null,
+    audit_report_label: null,
+    audit_extract_hint: null,
   }
 }
 
@@ -589,6 +592,18 @@ export default function App() {
         if (data.is_listed !== undefined) updateEntry(entryId, 'is_listed_hint', data.is_listed)
         if (data.market !== undefined) updateEntry(entryId, 'market_hint', data.market)
         if (data.established_date !== undefined) updateEntry(entryId, 'established_hint', data.established_date)
+        if (data.audit_report) {
+          updateEntry(entryId, 'audit_report_url', data.audit_report.url)
+          updateEntry(entryId, 'audit_report_label', `${data.audit_report.report_nm} (${data.audit_report.rcept_dt} 제출)`)
+        }
+        if (data.audit_extract_experimental) {
+          const ex = data.audit_extract_experimental
+          const parts = [
+            ex.revenue != null ? `매출 ${formatWonToEok(ex.revenue)}원` : null,
+            ex.asset != null ? `자산총액 ${formatWonToEok(ex.asset)}원` : null,
+          ].filter(Boolean)
+          updateEntry(entryId, 'audit_extract_hint', `자동추출 시도값(검증 필요): ${parts.join(', ')}`)
+        }
         return
       }
 
@@ -1222,7 +1237,19 @@ export default function App() {
                             <span>대기업 계열사 (담당자 확인 — 체크 시 매출액과 무관하게 대기업 적용)</span>
                           </label>
                           {e.revenue_source === 'auto' && <div className="entry-field-hint">{e.revenue_raw_value}</div>}
-                          {e.revenue_lookup_status === 'failed' && <div className="entry-field-hint entry-field-hint-error">{e.revenue_lookup_message}</div>}
+                          {e.revenue_lookup_status === 'failed' && (
+                            <div className="entry-field-hint entry-field-hint-error">
+                              {e.revenue_lookup_message}
+                              {e.audit_report_url && (
+                                <> {' '}
+                                  <a href={e.audit_report_url} target="_blank" rel="noreferrer">
+                                    {e.audit_report_label || '감사보고서 원문 보기'}
+                                  </a>
+                                </>
+                              )}
+                              {e.audit_extract_hint && <div style={{ marginTop: 2, color: '#9a6b16' }}>{e.audit_extract_hint}</div>}
+                            </div>
+                          )}
                           {e.revenue_lookup_status === 'ambiguous' && (
                             <div style={{ marginTop: 4 }}>
                               <div className="entry-field-hint entry-field-hint-warn">{e.revenue_lookup_message}</div>

@@ -1076,7 +1076,7 @@ export default function App() {
             </div>
             {tab === 'upload' && (
               <>
-                <div className="upload-box" onClick={() => fileInputRef.current?.click()}>
+                <label className="upload-box">
                   {uploading ? '처리 중입니다...' : '클릭하여 이력서 PDF/이미지 업로드 (여러 개 선택 시 배치 처리)'}
                   <input
                     ref={fileInputRef}
@@ -1086,7 +1086,7 @@ export default function App() {
                     style={{ display: 'none' }}
                     onChange={handleFileUpload}
                   />
-                </div>
+                </label>
                 {uploadQueue.length > 0 && (
                   <div style={{ marginTop: 12 }}>
                     <div style={{ fontSize: 12, color: '#666', marginBottom: 6 }}>
